@@ -193,6 +193,63 @@ If the scan contains multiple vessels, use a seed point to isolate the aneurysm.
 
 ---
 
+## OpenFOAM Workflow
+
+VORTEX is designed to produce CFD-ready geometry directly compatible with OpenFOAM's `snappyHexMesh` mesher.
+
+### 1. Export from VORTEX
+
+Run the full pipeline in the interactive shell:
+
+```
+load "/path/to/dicom"
+seed
+segment
+mesh
+centerlines
+extend
+export aneurysm_cfd.stl
+```
+
+For OpenFOAM, use **split patches** so each boundary (wall, inlet, outlet) is a separate STL file:
+
+```bash
+./run-cli.sh process /path/to/dicom/folder \
+    --centerlines \
+    --flow-extensions \
+    --split-patches \
+    --output aneurysm_cfd.stl
+```
+
+This produces:
+- `aneurysm_cfd_wall.stl` — vessel wall surface
+- `aneurysm_cfd_cap_2.stl`, `aneurysm_cfd_cap_3.stl`, … — inlet/outlet caps
+
+Or from the shell, set `split_patches = True` via `params`, then run `extend` and `export`.
+
+### 2. Place Files in OpenFOAM Case
+
+Copy the split STLs into `constant/triSurface/` in your OpenFOAM case directory.
+
+### 3. Configure `snappyHexMeshDict`
+
+Reference the STL files as named geometry regions:
+
+```cpp
+geometry
+{
+    wall.stl   { type triSurfaceMesh; name wall; }
+    cap_2.stl  { type triSurfaceMesh; name inlet; }
+    cap_3.stl  { type triSurfaceMesh; name outlet; }
+}
+```
+
+Then define boundary conditions in `0/U`, `0/p`, etc. using those patch names.
+
+> **Note:** VMTK assigns cap IDs geometrically — inspect the mesh in ParaView or OpenFOAM to determine which cap is the inlet vs. outlet before setting boundary conditions.
+
+---
+
 ## Project Structure
 - `vortex/cli.py`: Main entry point (CLI + interactive shell).
 - `vortex/pipeline/`: Pure logic for segmentation, meshing, and VMTK operations.
