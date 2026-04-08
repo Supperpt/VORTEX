@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment / Conda
+venv/
+.env/
+conda-env/
+.conda/
+Miniforge3.sh
+
+# IDEs
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+
+# Project Specific Outputs
+output.stl
+*.stl
+*.nii.gz
+*.mhd
+*.raw
+*.log
+
+# Clinical Data (Privacy)
+DICOM/
+dicom/
+*.dcm
+*.DCM
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Gemini CLI
+.gemini/
+Miniforge3.sh
+
+# Internal notes (not for public repo)
+LLM.md
+Instructions.md
+plan.md

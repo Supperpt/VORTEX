@@ -1,0 +1,18 @@
+# VORTEX Aneurysm — Python dependencies
+#
+# IMPORTANT: Install vmtk FIRST. It vendors its own VTK build.
+# Do NOT add 'vtk' here — it will conflict with vmtk's bundled VTK.
+#
+# Install order:
+#   pip install vmtk
+#   pip install -r requirements.txt
+#
+vmtk
+SimpleITK
+PyQt5
+PyQt5-sip
+numpy
+matplotlib
+scipy
+rich
+prompt_toolkit
