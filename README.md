@@ -80,6 +80,8 @@ By default, the `export <filename.stl>` command saves the file in your **current
 | `centerlines` | Compute vessel centerlines. |
 | `extend` | Add flow extensions and cap the model. |
 | `metrics` | Calculate morphological metrics for the aneurysm. |
+| `check` | Check mesh quality: manifold edges, open boundary loops, triangle quality, normal consistency. |
+| `check --deep` | Same as `check`, plus self-intersection detection (slow). |
 | `export <file>` | Save the final STL. Defaults to `output.stl` in the current directory. |
 | `export-mask <file.nii.gz>` | Export the segmentation mask (NIfTI format) for AI or radiomics. |
 
@@ -100,6 +102,24 @@ Process the largest series in the folder with default settings (150–400 HU).
 ```bash
 ./run-cli.sh process /path/to/dicom/folder -o result.stl
 ```
+
+### Check Mesh Quality
+Validate a mesh before further processing or CFD export.
+```bash
+./run-cli.sh check-mesh model.stl
+```
+
+Add `--deep` to also run self-intersection detection (slow on large meshes):
+```bash
+./run-cli.sh check-mesh model.stl --deep
+```
+
+Reports:
+- **Non-manifold edges** — CFD mesher will fail if any are found
+- **Open boundary loops** — count of vessel openings (≥2 expected before `extend`)
+- **Aspect ratio** (mean/max) and **min triangle angle**
+- **Normal consistency** — detects incorrectly oriented faces
+- **Self-intersections** (with `--deep` only)
 
 ### Process an Existing STL Mesh
 Apply centerlines, flow extensions, and watertight capping to an already segmented STL.
@@ -166,6 +186,13 @@ If the scan contains multiple vessels, use a seed point to isolate the aneurysm.
 | `--mode` | `cfd` | Output type: `cfd`, `fsi`, or `solid` |
 | `--wall-thickness` | `0.2` | Wall thickness in mm (for `fsi` mode) |
 | `--split-patches` | `False` | Split CFD output into separate STLs for wall and caps |
+
+### `check-mesh` (Mesh Quality Report)
+
+| Argument | Default | Description |
+|---|---|---|
+| `input_stl` | (Required) | Path to the STL file to check |
+| `--deep` | `False` | Also run self-intersection detection (slow) |
 
 ### `process-mesh` (STL to Capped STL)
 

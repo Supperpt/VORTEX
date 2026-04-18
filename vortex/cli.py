@@ -29,6 +29,7 @@ from vortex.pipeline.meshing import generate_mesh
 from vortex.pipeline.centerlines import compute_centerlines
 from vortex.pipeline.flow_extensions import add_flow_extensions
 from vortex.pipeline.exporter import export_stl
+from vortex.pipeline.mesh_quality import check_mesh_quality, extract_bad_triangles
 
 log = get_logger(__name__)
 console = Console()
@@ -164,6 +165,174 @@ def show_status_dashboard(session: Session):
         table.add_row("Flow Extensions", "[yellow]⚠ Optional[/yellow]", "Run 'extend'")
 
     console.print(table)
+
+def display_quality_report(report: dict):
+    """Render a mesh quality report dict as Rich tables."""
+    s = report['stats']
+
+    # ── Stats table ──────────────────────────────────────────────────────────
+    stats_table = Table(title="Mesh Quality Report", box=box.ROUNDED, expand=True)
+    stats_table.add_column("Check", style="cyan", width=26)
+    stats_table.add_column("Result", style="bold")
+    stats_table.add_column("Details", style="dim")
+
+    # Basic stats
+    stats_table.add_row("Points",        f"{s['points']:,}",    "")
+    stats_table.add_row("Triangles",     f"{s['triangles']:,}", "")
+    area = s['surface_area_mm2']
+    stats_table.add_row("Surface Area",
+        f"{area:.1f} mm²" if area else "N/A", "")
+    bbox = s['bbox_mm']
+    stats_table.add_row("Bounding Box",
+        f"{bbox[0]} × {bbox[1]} × {bbox[2]} mm", "")
+
+    # Non-manifold edges
+    nm = report['non_manifold_edges']
+    if nm == 0:
+        stats_table.add_row("Non-manifold Edges",
+            "[green]✓ None[/green]", "Manifold surface")
+    else:
+        stats_table.add_row("Non-manifold Edges",
+            f"[red]✗ {nm}[/red]", "CFD mesher will fail")
+
+    # Boundary loops
+    loops = report['boundary_loops']
+    if loops == 0:
+        stats_table.add_row("Open Boundary Loops",
+            "[green]✓ 0 (closed)[/green]", "Watertight")
+    elif loops >= 2:
+        stats_table.add_row("Open Boundary Loops",
+            f"[yellow]⚠ {loops}[/yellow]", "Expected before 'extend'")
+    else:
+        stats_table.add_row("Open Boundary Loops",
+            f"[red]✗ {loops}[/red]", "Need ≥2 for CFD")
+
+    # Triangle quality
+    q = report.get('triangle_quality')
+    if q:
+        ar_color = "green" if q['max_aspect_ratio'] <= 5.0 else (
+                   "yellow" if q['max_aspect_ratio'] <= 20.0 else "red")
+        stats_table.add_row("Aspect Ratio (mean/max)",
+            f"[{ar_color}]{q['mean_aspect_ratio']} / {q['max_aspect_ratio']}[/{ar_color}]", "")
+        if q.get('min_angle_deg') is not None:
+            ang = q['min_angle_deg']
+            ang_color = "green" if ang >= 10.0 else ("yellow" if ang >= 5.0 else "red")
+            stats_table.add_row("Min Triangle Angle",
+                f"[{ang_color}]{ang}°[/{ang_color}]", "")
+    else:
+        stats_table.add_row("Triangle Quality", "[dim]N/A[/dim]", "")
+
+    # Normals
+    n_flip  = report['normals_flipped']
+    n_total = report['normals_total']
+    if n_total == 0:
+        stats_table.add_row("Normals", "[dim]N/A[/dim]", "No normals on mesh")
+    elif n_flip == 0:
+        stats_table.add_row("Normals",
+            "[green]✓ Consistent[/green]", f"{n_total:,} points checked")
+    else:
+        frac = n_flip / n_total
+        color = "yellow" if frac < 0.05 else "red"
+        stats_table.add_row("Normals",
+            f"[{color}]⚠ ~{n_flip:,} flipped[/{color}]",
+            f"of {n_total:,} points")
+
+    # Self-intersections
+    si = report.get('self_intersections')
+    if si is None:
+        stats_table.add_row("Self-Intersections",
+            "[dim]–[/dim]", "Run 'check --deep' to enable")
+    elif si == 0:
+        stats_table.add_row("Self-Intersections",
+            "[green]✓ None[/green]", "")
+    else:
+        stats_table.add_row("Self-Intersections",
+            f"[red]✗ {si}[/red]", "Fix in MeshLab")
+
+    console.print(stats_table)
+
+    # ── Issues summary ───────────────────────────────────────────────────────
+    issues = report.get('issues', [])
+    if issues:
+        console.print()
+        for severity, msg in issues:
+            if severity == 'error':
+                console.print(f"  [bold red]✗[/bold red] {msg}")
+            elif severity == 'warning':
+                console.print(f"  [bold yellow]⚠[/bold yellow] {msg}")
+            else:
+                console.print(f"  [bold blue]ℹ[/bold blue] {msg}")
+
+
+def display_bad_triangles(worst, ar_threshold, export_path=None):
+    """Print a Rich table of the worst triangles and report export status."""
+    if not worst:
+        console.print(f"  [green]✓ No triangles exceed AR {ar_threshold}[/green]")
+        return
+
+    t = Table(title=f"Worst Triangles (AR > {ar_threshold})", box=box.SIMPLE, expand=False)
+    t.add_column("Rank",    style="dim",  width=5)
+    t.add_column("AR",      style="red bold", width=10)
+    t.add_column("Centroid X (mm)", width=16)
+    t.add_column("Centroid Y (mm)", width=16)
+    t.add_column("Centroid Z (mm)", width=16)
+
+    for rank, (ar, (cx, cy, cz)) in enumerate(worst[:20], 1):
+        t.add_row(str(rank), f"{ar:.2f}", f"{cx:.2f}", f"{cy:.2f}", f"{cz:.2f}")
+
+    console.print(t)
+    if len(worst) > 20:
+        console.print(f"  [dim]… {len(worst) - 20} more bad triangles not shown[/dim]")
+
+    if export_path:
+        console.print(f"  [cyan]Bad triangles exported to:[/cyan] {export_path}")
+
+
+def do_check_mesh(args):
+    """CLI handler: check-mesh command."""
+    from vortex.utils.vtk_compat import vtk as _vtk
+
+    if not os.path.exists(args.input_stl):
+        console.print(f"[bold red]File not found:[/bold red] {args.input_stl}")
+        return 1
+
+    console.print(f"\n[bold blue]Checking mesh:[/bold blue] {args.input_stl}")
+    reader = _vtk.vtkSTLReader()
+    reader.SetFileName(args.input_stl)
+    reader.Update()
+    mesh = reader.GetOutput()
+
+    if mesh.GetNumberOfPoints() == 0:
+        console.print("[bold red]STL loaded but contains no geometry.[/bold red]")
+        return 1
+
+    with console.status("[cyan]Running quality checks...", spinner="dots"):
+        report = check_mesh_quality(mesh, deep=args.deep)
+
+    display_quality_report(report)
+
+    ar_threshold = getattr(args, 'ar_threshold', 20.0)
+    export_bad   = getattr(args, 'export_bad', None)
+
+    q = report.get('triangle_quality')
+    if q and q['max_aspect_ratio'] > ar_threshold:
+        console.print()
+        with console.status("[cyan]Locating bad triangles...", spinner="dots"):
+            bad_poly, worst = extract_bad_triangles(mesh, ar_threshold=ar_threshold)
+
+        saved_path = None
+        if bad_poly is not None and export_bad:
+            from vortex.utils.vtk_compat import vtk as _vtk2
+            writer = _vtk2.vtkSTLWriter()
+            writer.SetInputData(bad_poly)
+            writer.SetFileName(export_bad)
+            writer.Write()
+            saved_path = export_bad
+
+        display_bad_triangles(worst, ar_threshold, export_path=saved_path)
+
+    return 0
+
 
 # ---------------------------------------------------------------------------
 # Command Handlers
@@ -319,7 +488,7 @@ def do_shell():
     from prompt_toolkit.completion import WordCompleter
     import shlex
 
-    commands = ["load", "load-mesh", "list", "seed", "segment", "mesh", "centerlines", "extend", "export", "export-mask", "status", "params", "metrics", "help", "exit"]
+    commands = ["load", "load-mesh", "list", "seed", "segment", "mesh", "check", "centerlines", "extend", "export", "export-mask", "status", "params", "metrics", "help", "exit"]
     completer = WordCompleter(commands, ignore_case=True)
     ps = PromptSession(completer=completer)
 
@@ -352,6 +521,10 @@ def do_shell():
                     "  [cyan]mesh[/cyan]           Generate mesh\n"
                     "  [cyan]centerlines[/cyan]    Compute centerlines\n"
                     "  [cyan]extend[/cyan]         Add flow extensions & cap\n"
+                    "  [cyan]check[/cyan]                        Check mesh quality (manifold, holes, triangle quality)\n"
+                    "  [cyan]check --deep[/cyan]                 Also run self-intersection detection (slow)\n"
+                    "  [cyan]check --export-bad bad.stl[/cyan]   Export bad triangles (AR>20) to STL\n"
+                    "  [cyan]check --ar-threshold 10[/cyan]      Change bad-triangle AR threshold\n"
                     "  [cyan]export <file>[/cyan]   Export final STL\n"
                     "  [cyan]export-mask <f>[/cyan] Export segmentation mask (NIfTI)\n"
                     "  [cyan]metrics[/cyan]        Compute aneurysm metrics\n"
@@ -440,6 +613,54 @@ def do_shell():
                 else:
                     session.surface = run_pipeline_step("Meshing", generate_mesh, session.vtk_image, session.params)
                     session.final_surface = session.surface
+
+            elif cmd == "check":
+                target = session.final_surface or session.surface
+                if target is None:
+                    console.print("[red]No mesh loaded. Run 'mesh' or 'load-mesh' first.[/red]")
+                else:
+                    deep = "--deep" in parts
+
+                    # parse --ar-threshold N
+                    ar_threshold = 20.0
+                    if "--ar-threshold" in parts:
+                        idx = parts.index("--ar-threshold")
+                        try:
+                            ar_threshold = float(parts[idx + 1])
+                        except (IndexError, ValueError):
+                            console.print("[yellow]--ar-threshold requires a number, using 20.0[/yellow]")
+
+                    # parse --export-bad <file>
+                    export_bad = None
+                    if "--export-bad" in parts:
+                        idx = parts.index("--export-bad")
+                        try:
+                            export_bad = parts[idx + 1]
+                        except IndexError:
+                            console.print("[yellow]--export-bad requires a file path[/yellow]")
+
+                    if deep:
+                        console.print("[dim]Running deep check (self-intersections — may be slow)...[/dim]")
+                    with console.status("[cyan]Running quality checks...", spinner="dots"):
+                        report = check_mesh_quality(target, deep=deep)
+                    display_quality_report(report)
+
+                    q = report.get('triangle_quality')
+                    if q and q['max_aspect_ratio'] > ar_threshold:
+                        console.print()
+                        with console.status("[cyan]Locating bad triangles...", spinner="dots"):
+                            bad_poly, worst = extract_bad_triangles(target, ar_threshold=ar_threshold)
+
+                        saved_path = None
+                        if bad_poly is not None and export_bad:
+                            from vortex.utils.vtk_compat import vtk as _vtk2
+                            writer = _vtk2.vtkSTLWriter()
+                            writer.SetInputData(bad_poly)
+                            writer.SetFileName(export_bad)
+                            writer.Write()
+                            saved_path = export_bad
+
+                        display_bad_triangles(worst, ar_threshold, export_path=saved_path)
 
             elif cmd == "centerlines":
                 if session.surface is None:
@@ -614,6 +835,16 @@ def create_parser() -> argparse.ArgumentParser:
     seed_p.add_argument("folder", help="Path to DICOM folder")
     seed_p.add_argument("--series-uid", help="Specific SeriesInstanceUID to load (default: largest)")
 
+    # Command: check-mesh
+    chk_p = subparsers.add_parser("check-mesh", help="Report mesh quality (manifold, holes, triangle quality)")
+    chk_p.add_argument("input_stl", help="Path to STL file to check")
+    chk_p.add_argument("--deep", action="store_true",
+                       help="Also run self-intersection detection (slow)")
+    chk_p.add_argument("--export-bad", metavar="FILE",
+                       help="Export bad triangles (above --ar-threshold) to this STL file")
+    chk_p.add_argument("--ar-threshold", type=float, default=20.0, metavar="N",
+                       help="Aspect-ratio threshold for bad-triangle detection (default: 20.0)")
+
     # Command: process-mesh
     mesh_p = subparsers.add_parser("process-mesh", help="Apply centerlines/extensions/capping to an existing STL")
     mesh_p.add_argument("input_stl", help="Path to input STL file")
@@ -680,6 +911,8 @@ def main():
             do_list_series(args)
         elif args.command == "seed-picker":
             do_seed_picker(args)
+        elif args.command == "check-mesh":
+            sys.exit(do_check_mesh(args))
         elif args.command == "process-mesh":
             sys.exit(do_process_mesh(args))
         elif args.command == "process":
