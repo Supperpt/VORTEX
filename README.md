@@ -61,6 +61,9 @@ For a standard CFD-ready aneurysm extraction, follow this sequence inside the sh
 5. **`centerlines`** — Computes the mathematical centerlines of the vessel branches.
 6. **`extend`** — Adds cylindrical flow extensions to the inlets/outlets and caps them.
 7. **`metrics`** *(Optional)* — Computes morphological biomarkers (Aspect Ratio, Size Ratio) based on your seed point.
+
+   _7.5. **`clip-sac`** *(Optional)* — Automatically detects the aneurysm neck plane using VMTK (Piccinelli method) and splits the wall surface into an `aneurysm_dome` patch and a `parent_vessel` patch. When run before `export` with `split_patches = True`, the output will include `aneurysm_dome.stl` and `parent_vessel.stl` instead of `wall.stl`, plus `neck_plane.json` encoding the cutting plane geometry. Requires seed point and centerlines._
+
 8. **`export my_aneurysm.stl`** — Saves the final 3D model.
 
 **Where does the output go?**
@@ -80,6 +83,7 @@ By default, the `export <filename.stl>` command saves the file in your **current
 | `centerlines` | Compute vessel centerlines. |
 | `extend` | Add flow extensions and cap the model. |
 | `metrics` | Calculate morphological metrics for the aneurysm. |
+| `clip-sac` | Detect the aneurysm neck and split the wall surface into dome + parent vessel patches. Requires seed point and centerlines. |
 | `check` | Check mesh quality: manifold edges, open boundary loops, triangle quality, normal consistency. |
 | `check --deep` | Same as `check`, plus self-intersection detection (slow). |
 | `export <file>` | Save the final STL. Defaults to `output.stl` in the current directory. |
@@ -147,6 +151,8 @@ If you need the vessel wall and individual inlet/outlet caps as separate files (
     --output model.stl
 ```
 *This generates `model_wall.stl`, `model_cap_2.stl`, `model_cap_3.stl`, etc. VMTK assigns IDs geometrically — inspect in your CFD software to identify which cap is inlet/outlet.*
+
+> **Aneurysm sac split:** If you run `clip-sac` in the interactive shell before exporting, the split-patches output replaces `model_wall.stl` with `model_aneurysm_dome.stl` + `model_parent_vessel.stl` (and writes `model_neck_plane.json`). Without `clip-sac`, the classic `wall.stl` + caps output is unchanged.
 
 ### Advanced: ROI & Seed Isolation
 If the scan contains multiple vessels, use a seed point to isolate the aneurysm.

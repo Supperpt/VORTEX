@@ -30,6 +30,7 @@ from vortex.pipeline.centerlines import compute_centerlines
 from vortex.pipeline.flow_extensions import add_flow_extensions
 from vortex.pipeline.exporter import export_stl
 from vortex.pipeline.mesh_quality import check_mesh_quality, extract_bad_triangles
+from vortex.pipeline.sac_clipping import clip_aneurysm_sac
 
 log = get_logger(__name__)
 console = Console()
@@ -48,6 +49,9 @@ class Session:
         self.centerlines: Any = None
         self.profiles: list = []
         self.final_surface: Any = None
+        self.sac_surface: Any = None       # aneurysm dome (from clip-sac)
+        self.parent_vessel: Any = None     # parent vessel wall (from clip-sac)
+        self.neck_plane: dict = None       # {'origin': [...], 'normal': [...]}
         self.params: PipelineParams = PipelineParams()
 
 session = Session()
@@ -163,6 +167,12 @@ def show_status_dashboard(session: Session):
         table.add_row("Flow Extensions", "[green]✓ Applied[/green]", "Run 'export' to save CFD model")
     else:
         table.add_row("Flow Extensions", "[yellow]⚠ Optional[/yellow]", "Run 'extend'")
+
+    # Sac Clipping
+    if session.sac_surface is not None:
+        table.add_row("Sac Clipping", "[green]✓ Done[/green]", "Will split wall into dome+parent on 'export --split-patches'")
+    else:
+        table.add_row("Sac Clipping", "[yellow]⚠ Optional[/yellow]", "Run 'clip-sac' for biomarker patches")
 
     console.print(table)
 
@@ -488,7 +498,7 @@ def do_shell():
     from prompt_toolkit.completion import WordCompleter
     import shlex
 
-    commands = ["load", "load-mesh", "list", "seed", "segment", "mesh", "check", "centerlines", "extend", "export", "export-mask", "status", "params", "metrics", "help", "exit"]
+    commands = ["load", "load-mesh", "list", "seed", "segment", "mesh", "check", "centerlines", "extend", "clip-sac", "export", "export-mask", "status", "params", "metrics", "help", "exit"]
     completer = WordCompleter(commands, ignore_case=True)
     ps = PromptSession(completer=completer)
 
@@ -521,6 +531,7 @@ def do_shell():
                     "  [cyan]mesh[/cyan]           Generate mesh\n"
                     "  [cyan]centerlines[/cyan]    Compute centerlines\n"
                     "  [cyan]extend[/cyan]         Add flow extensions & cap\n"
+                    "  [cyan]clip-sac[/cyan]       Detect aneurysm neck & split wall into dome + parent vessel patches\n"
                     "  [cyan]check[/cyan]                        Check mesh quality (manifold, holes, triangle quality)\n"
                     "  [cyan]check --deep[/cyan]                 Also run self-intersection detection (slow)\n"
                     "  [cyan]check --export-bad bad.stl[/cyan]   Export bad triangles (AR>20) to STL\n"
@@ -702,6 +713,37 @@ def do_shell():
                     session.params.flow_ext_selected = ids
                     session.final_surface = run_pipeline_step("Flow Extensions", add_flow_extensions, session.surface, session.centerlines, session.params)
 
+            elif cmd == "clip-sac":
+                if session.surface is None:
+                    console.print("[red]Run 'mesh' or 'load-mesh' first.[/red]")
+                elif session.centerlines is None:
+                    console.print("[red]Run 'centerlines' first.[/red]")
+                elif not session.params.seed_point_ijk:
+                    console.print("[red]A seed point is required. Run 'seed' or set seed_ijk via 'params'.[/red]")
+                elif session.sitk_image is None:
+                    console.print("[red]DICOM image not loaded. Cannot convert seed IJK to physical mm. Load DICOM first with 'load'.[/red]")
+                else:
+                    from vortex.pipeline.dicom_loader import ijk_to_mm
+                    seed_mm = ijk_to_mm(session.sitk_image, session.params.seed_point_ijk)
+                    result = run_pipeline_step("Aneurysm Sac Clipping", clip_aneurysm_sac,
+                                               session.surface, session.centerlines, seed_mm)
+                    session.sac_surface  = result['sac']
+                    session.parent_vessel = result['parent']
+                    session.neck_plane   = result['neck_plane']
+
+                    table = Table(title="Sac Clipping Result", header_style="bold magenta")
+                    table.add_column("Item", style="cyan")
+                    table.add_column("Value", style="green")
+                    table.add_row("Dome points",   f"{session.sac_surface.GetNumberOfPoints():,}")
+                    table.add_row("Parent points", f"{session.parent_vessel.GetNumberOfPoints():,}")
+                    if session.neck_plane:
+                        o = session.neck_plane['origin']
+                        n = session.neck_plane['normal']
+                        table.add_row("Neck origin (mm)", f"{o[0]:.1f}, {o[1]:.1f}, {o[2]:.1f}")
+                        table.add_row("Neck normal",      f"{n[0]:.3f}, {n[1]:.3f}, {n[2]:.3f}")
+                    console.print(table)
+                    console.print("[dim]When 'split_patches = True', export will write aneurysm_dome.stl + parent_vessel.stl instead of wall.stl.[/dim]")
+
             elif cmd == "metrics":
                 if session.surface is None:
                     console.print("[red]Run 'mesh' first to generate a surface.[/red]")
@@ -736,7 +778,11 @@ def do_shell():
                     console.print("[red]Nothing to export.[/red]")
                 else:
                     path = parts[1] if len(parts) > 1 else "output.stl"
-                    run_pipeline_step("Exporting STL", export_stl, session.final_surface, path, session.params)
+                    run_pipeline_step("Exporting STL", export_stl,
+                                      session.final_surface, path, session.params,
+                                      sac_surface=session.sac_surface,
+                                      parent_surface=session.parent_vessel,
+                                      neck_plane=session.neck_plane)
 
             elif cmd == "export-mask":
                 if session.vtk_image is None:
