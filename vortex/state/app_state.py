@@ -40,6 +40,9 @@ class PipelineParams:
     # Seed point
     seed_point_ijk: Optional[tuple] = None # (i, j, k) in image index coordinates
 
+    # Aneurysm sac clipping
+    sac_bulge_ratio: float = 1.4     # clip-sac threshold: dist-to-centerline / MISR
+
     def copy(self) -> "PipelineParams":
         """Return a shallow copy — safe to pass to workers without sharing refs."""
         return PipelineParams(
@@ -60,6 +63,7 @@ class PipelineParams:
             solid=self.solid,
             split_patches=self.split_patches,
             seed_point_ijk=self.seed_point_ijk,
+            sac_bulge_ratio=self.sac_bulge_ratio,
         )
 
 

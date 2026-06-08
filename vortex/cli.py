@@ -52,6 +52,7 @@ class Session:
         self.sac_surface: Any = None       # aneurysm dome (from clip-sac)
         self.parent_vessel: Any = None     # parent vessel wall (from clip-sac)
         self.neck_plane: dict = None       # {'origin': [...], 'normal': [...]}
+        self.seed_mm: Optional[tuple] = None  # (x,y,z) mm — set by set-seed or DICOM seed
         self.params: PipelineParams = PipelineParams()
 
 session = Session()
@@ -139,10 +140,14 @@ def show_status_dashboard(session: Session):
         table.add_row("DICOM Volume", "[red]✗ Missing[/red]", "Run 'load <dir>'")
 
     # Seed
-    if session.params.seed_point_ijk is not None:
+    if session.seed_mm is not None:
+        mm = session.seed_mm
+        table.add_row("Seed Point", "[green]✓ Set (mm)[/green]",
+                      f"({mm[0]:.1f}, {mm[1]:.1f}, {mm[2]:.1f}) mm")
+    elif session.params.seed_point_ijk is not None:
         table.add_row("Seed Point", "[green]✓ Picked[/green]", f"IJK: {session.params.seed_point_ijk}")
     else:
-        table.add_row("Seed Point", "[yellow]⚠ Optional[/yellow]", "Run 'seed'")
+        table.add_row("Seed Point", "[yellow]⚠ Optional[/yellow]", "Run 'seed' (DICOM) or 'set-seed X Y Z'")
 
     # Mask
     if session.vtk_image is not None:
@@ -498,7 +503,7 @@ def do_shell():
     from prompt_toolkit.completion import WordCompleter
     import shlex
 
-    commands = ["load", "load-mesh", "list", "seed", "segment", "mesh", "check", "centerlines", "extend", "clip-sac", "export", "export-mask", "status", "params", "metrics", "help", "exit"]
+    commands = ["load", "load-mesh", "list", "seed", "set-seed", "segment", "mesh", "check", "centerlines", "extend", "clip-sac", "export", "export-mask", "status", "params", "metrics", "help", "exit"]
     completer = WordCompleter(commands, ignore_case=True)
     ps = PromptSession(completer=completer)
 
@@ -522,25 +527,26 @@ def do_shell():
             elif cmd == "help":
                 console.print(
                     "[bold]Available Commands:[/bold]\n"
-                    "  [cyan]load <dir>[/cyan]         Load DICOM folder\n"
-                    "  [cyan]load-mesh <file>[/cyan]  Load external STL as surface (skips segment/mesh)\n"
-                    "  [cyan]list[/cyan]               List series in loaded folder\n"
-                    "  [cyan]seed[/cyan]           Open visual seed picker\n"
-                    "  [cyan]status[/cyan]         Show pipeline dashboard\n"
-                    "  [cyan]segment[/cyan]        Run segmentation\n"
-                    "  [cyan]mesh[/cyan]           Generate mesh\n"
-                    "  [cyan]centerlines[/cyan]    Compute centerlines\n"
-                    "  [cyan]extend[/cyan]         Add flow extensions & cap\n"
-                    "  [cyan]clip-sac[/cyan]       Detect aneurysm neck & split wall into dome + parent vessel patches\n"
+                    "  [cyan]load <dir>[/cyan]              Load DICOM folder\n"
+                    "  [cyan]load-mesh <file>[/cyan]        Load external STL as surface (skips segment/mesh)\n"
+                    "  [cyan]list[/cyan]                    List series in loaded folder\n"
+                    "  [cyan]seed[/cyan]                    Open DICOM visual seed picker (requires DICOM)\n"
+                    "  [cyan]set-seed X Y Z[/cyan]          Set seed coordinates (e.g. read from MeshLab/Meshmixer)\n"
+                    "  [cyan]status[/cyan]                  Show pipeline dashboard\n"
+                    "  [cyan]segment[/cyan]                 Run segmentation\n"
+                    "  [cyan]mesh[/cyan]                    Generate mesh\n"
+                    "  [cyan]centerlines[/cyan]             Compute centerlines\n"
+                    "  [cyan]extend[/cyan]                  Add flow extensions & cap\n"
+                    "  [cyan]clip-sac [--ratio N][/cyan]   Split wall into dome + parent via centerline bulge field (writes heatmap)\n"
                     "  [cyan]check[/cyan]                        Check mesh quality (manifold, holes, triangle quality)\n"
                     "  [cyan]check --deep[/cyan]                 Also run self-intersection detection (slow)\n"
                     "  [cyan]check --export-bad bad.stl[/cyan]   Export bad triangles (AR>20) to STL\n"
                     "  [cyan]check --ar-threshold 10[/cyan]      Change bad-triangle AR threshold\n"
-                    "  [cyan]export <file>[/cyan]   Export final STL\n"
-                    "  [cyan]export-mask <f>[/cyan] Export segmentation mask (NIfTI)\n"
-                    "  [cyan]metrics[/cyan]        Compute aneurysm metrics\n"
-                    "  [cyan]params[/cyan]         Show/edit parameters\n"
-                    "  [cyan]exit[/cyan]           Quit shell"
+                    "  [cyan]export <file>[/cyan]           Export final STL\n"
+                    "  [cyan]export-mask <f>[/cyan]         Export segmentation mask (NIfTI)\n"
+                    "  [cyan]metrics[/cyan]                 Compute aneurysm metrics\n"
+                    "  [cyan]params[/cyan]                  Show/edit parameters\n"
+                    "  [cyan]exit[/cyan]                    Quit shell"
                 )
 
             elif cmd == "status":
@@ -588,7 +594,7 @@ def do_shell():
                     console.print(
                         f"[green]Loaded:[/green] {stl_path}\n"
                         f"  {n_pts:,} points, {n_cells:,} triangles\n"
-                        f"[dim]Ready for 'centerlines' → 'extend' → 'export'[/dim]"
+                        f"[dim]Workflow: 'centerlines' → 'extend' → 'set-seed X Y Z' → 'clip-sac' → 'export'[/dim]"
                     )
                 except Exception as e:
                     console.print(f"[red]Failed to load STL:[/red] {e}")
@@ -611,6 +617,23 @@ def do_shell():
                     ijk = do_seed_picker(args)
                     if ijk:
                         session.params.seed_point_ijk = ijk
+
+            elif cmd == "set-seed":
+                parts = parts[1:]
+                if len(parts) != 3:
+                    console.print(
+                        "[red]Usage: set-seed X Y Z[/red]  (world mm coordinates, e.g. from MeshLab)"
+                    )
+                else:
+                    try:
+                        seed_mm = (float(parts[0]), float(parts[1]), float(parts[2]))
+                        session.seed_mm = seed_mm
+                        console.print(
+                            f"[green]✓ Seed set:[/green] "
+                            f"({seed_mm[0]:.2f}, {seed_mm[1]:.2f}, {seed_mm[2]:.2f}) mm"
+                        )
+                    except ValueError:
+                        console.print("[red]Coordinates must be numbers, e.g.: set-seed 12.3 -4.5 67.8[/red]")
 
             elif cmd == "segment":
                 if session.sitk_image is None:
@@ -718,60 +741,139 @@ def do_shell():
                     console.print("[red]Run 'mesh' or 'load-mesh' first.[/red]")
                 elif session.centerlines is None:
                     console.print("[red]Run 'centerlines' first.[/red]")
-                elif not session.params.seed_point_ijk:
-                    console.print("[red]A seed point is required. Run 'seed' or set seed_ijk via 'params'.[/red]")
-                elif session.sitk_image is None:
-                    console.print("[red]DICOM image not loaded. Cannot convert seed IJK to physical mm. Load DICOM first with 'load'.[/red]")
                 else:
-                    from vortex.pipeline.dicom_loader import ijk_to_mm
-                    seed_mm = ijk_to_mm(session.sitk_image, session.params.seed_point_ijk)
-                    result = run_pipeline_step("Aneurysm Sac Clipping", clip_aneurysm_sac,
-                                               session.surface, session.centerlines, seed_mm)
+                    # Parse optional --ratio override (else use the stored param)
+                    ratio = session.params.sac_bulge_ratio
+                    _tok = parts[1:]
+                    if "--ratio" in _tok:
+                        try:
+                            ratio = float(_tok[_tok.index("--ratio") + 1])
+                        except (IndexError, ValueError):
+                            console.print("[red]Usage: clip-sac [--ratio N]  (e.g. clip-sac --ratio 1.7)[/red]")
+                            continue
+                    session.params.sac_bulge_ratio = ratio
+
+                    # Resolve seed in mm — prefer explicit seed_mm, then convert IJK if DICOM loaded
+                    seed_mm = session.seed_mm
+                    if seed_mm is None and session.params.seed_point_ijk and session.sitk_image:
+                        from vortex.pipeline.dicom_loader import ijk_to_mm
+                        seed_mm = ijk_to_mm(session.sitk_image, session.params.seed_point_ijk)
+                    if seed_mm is None:
+                        console.print(
+                            "[red]No seed point available.[/red]\n"
+                            "[dim]Options:\n"
+                            "  • 'set-seed X Y Z'   — type coordinates from MeshLab / Meshmixer\n"
+                            "  • 'seed'             — DICOM slice picker (requires DICOM loaded)[/dim]"
+                        )
+                        continue
+
+                    # Choose the surface to clip. Prefer the EXTENDED wall
+                    # (EntityId==1 = vessel wall + flow extensions, caps excluded) so
+                    # the flow extensions stay in parent_vessel. The bulge-field clip
+                    # handles bifurcations correctly: the dome is one high-bulge region
+                    # (removed via the seed); vessels/extensions are low-bulge or
+                    # separate regions and are kept. Falls back to the pre-extension
+                    # surface when 'extend' hasn't been run.
+                    clip_surface = session.surface
+                    if session.final_surface is not None:
+                        from vortex.utils.vtk_compat import vtk as _vtk
+                        _arr = session.final_surface.GetCellData().GetArray("CellEntityIds")
+                        if _arr is not None:
+                            _thresh = _vtk.vtkThreshold()
+                            _thresh.SetInputData(session.final_surface)
+                            _thresh.SetInputArrayToProcess(
+                                0, 0, 0,
+                                _vtk.vtkDataObject.FIELD_ASSOCIATION_CELLS,
+                                "CellEntityIds")
+                            _thresh.SetLowerThreshold(1)
+                            _thresh.SetUpperThreshold(1)
+                            _thresh.Update()
+                            _geom = _vtk.vtkGeometryFilter()
+                            _geom.SetInputConnection(_thresh.GetOutputPort())
+                            _geom.Update()
+                            _wall_ext = _geom.GetOutput()
+                            if _wall_ext.GetNumberOfPoints() > 0:
+                                clip_surface = _wall_ext
+                        else:
+                            console.print("[yellow]⚠ 'extend' output has no patch labels; "
+                                          "clipping the pre-extension surface.[/yellow]")
+
+                    try:
+                        result = run_pipeline_step("Aneurysm Sac Clipping", clip_aneurysm_sac,
+                                                   clip_surface, session.centerlines, seed_mm,
+                                                   ratio)
+                    except Exception as e:
+                        console.print(f"[red]Sac clipping failed:[/red] {e}")
+                        continue
                     session.sac_surface  = result['sac']
                     session.parent_vessel = result['parent']
                     session.neck_plane   = result['neck_plane']
 
+                    # Write the bulge-field heatmap for visual inspection / tuning.
+                    # NOTE: this is a DIAGNOSTIC file only — not part of the CFD export.
+                    from vortex.pipeline.sac_clipping import export_bulge_heatmap
+                    heatmap_path = os.path.abspath("sac_bulge_heatmap.ply")
+                    try:
+                        export_bulge_heatmap(result['bulge_surface'], heatmap_path)
+                        console.print(f"[cyan]Bulge heatmap (diagnostic):[/cyan] {heatmap_path} "
+                                      "[dim](inspect in MeshLab — dome=red, vessel=blue; not exported)[/dim]")
+                    except Exception as e:
+                        console.print(f"[yellow]Could not write heatmap: {e}[/yellow]")
+
+                    _st = result['stats']
                     table = Table(title="Sac Clipping Result", header_style="bold magenta")
                     table.add_column("Item", style="cyan")
                     table.add_column("Value", style="green")
-                    table.add_row("Dome points",   f"{session.sac_surface.GetNumberOfPoints():,}")
-                    table.add_row("Parent points", f"{session.parent_vessel.GetNumberOfPoints():,}")
+                    table.add_row("Bulge ratio used", f"{result['ratio']:.2f}")
+                    table.add_row("Dome cells",   f"{session.sac_surface.GetNumberOfCells():,}")
+                    table.add_row("Parent cells", f"{session.parent_vessel.GetNumberOfCells():,}")
+                    table.add_row("Bulge median / p90 / p99 / max",
+                                  f"{_st['median']:.2f} / {_st['p90']:.2f} / "
+                                  f"{_st['p99']:.2f} / {_st['max']:.2f}")
                     if session.neck_plane:
                         o = session.neck_plane['origin']
                         n = session.neck_plane['normal']
                         table.add_row("Neck origin (mm)", f"{o[0]:.1f}, {o[1]:.1f}, {o[2]:.1f}")
                         table.add_row("Neck normal",      f"{n[0]:.3f}, {n[1]:.3f}, {n[2]:.3f}")
                     console.print(table)
-                    console.print("[dim]When 'split_patches = True', export will write aneurysm_dome.stl + parent_vessel.stl instead of wall.stl.[/dim]")
+                    console.print(
+                        "[dim]Tune with [cyan]clip-sac --ratio N[/cyan]: "
+                        "higher → smaller dome (toward apex), lower → larger dome (toward neck).[/dim]"
+                    )
+                    # Automatically enable split_patches so the next export writes
+                    # separate dome/parent/cap files without the user needing to set params.
+                    session.params.split_patches = True
+                    console.print("[green]split_patches automatically enabled.[/green] "
+                                  "Next 'export' will write aneurysm_dome.stl + parent_vessel.stl + cap_N.stl.")
 
             elif cmd == "metrics":
                 if session.surface is None:
                     console.print("[red]Run 'mesh' first to generate a surface.[/red]")
-                elif not session.params.seed_point_ijk:
-                    console.print("[red]A seed point is required to estimate aneurysm metrics. Run 'seed' or set 'seed_ijk' in params.[/red]")
                 else:
                     from vortex.pipeline.measurement import estimate_aneurysm_geometry
-                    from vortex.pipeline.dicom_loader import ijk_to_mm
-                    
-                    if session.sitk_image:
+
+                    seed_mm = session.seed_mm
+                    if seed_mm is None and session.params.seed_point_ijk and session.sitk_image:
+                        from vortex.pipeline.dicom_loader import ijk_to_mm
                         seed_mm = ijk_to_mm(session.sitk_image, session.params.seed_point_ijk)
-                        
+                    if seed_mm is None:
+                        console.print(
+                            "[red]No seed point available.[/red] "
+                            "Run 'set-seed X Y Z' or 'seed' (DICOM) first."
+                        )
+                    else:
                         with console.status("[bold green]Calculating metrics..."):
                             metrics = estimate_aneurysm_geometry(session.surface, seed_mm)
-                        
+
                         if metrics:
                             table = Table(title="Morphological Metrics", header_style="bold magenta")
                             table.add_column("Metric", style="cyan")
                             table.add_column("Value", justify="right", style="green")
-                            
                             for k, v in metrics.items():
                                 table.add_row(k.replace("_", " ").title(), str(v))
-                            
                             console.print(table)
                         else:
                             console.print("[red]Failed to compute metrics. Ensure the seed is near the aneurysm on the surface.[/red]")
-                    else:
-                         console.print("[red]DICOM image not loaded. Cannot convert seed IJK to physical mm.[/red]")
 
             elif cmd == "export":
                 if session.final_surface is None:
@@ -831,10 +933,11 @@ def do_shell():
                 table.add_row("flow_ext_ratio", str(p.flow_ext_ratio))
                 table.add_row("output_mode", "fsi" if p.build_wall else "solid" if p.solid else "cfd")
                 table.add_row("split_patches", str(p.split_patches))
-                
+                table.add_row("sac_bulge_ratio", str(p.sac_bulge_ratio))
+
                 console.print(table)
                 if Confirm.ask("Edit a parameter?"):
-                    key = Prompt.ask("Parameter name", choices=["lower", "upper", "resample", "roi", "levelset", "ls_iter", "ls_curv", "ls_prop", "ratio", "split"])
+                    key = Prompt.ask("Parameter name", choices=["lower", "upper", "resample", "roi", "levelset", "ls_iter", "ls_curv", "ls_prop", "ratio", "split", "sac_ratio"])
                     val = Prompt.ask("New value")
                     if key == "lower": p.lower_threshold = float(val)
                     if key == "upper": p.upper_threshold = float(val)
@@ -846,6 +949,7 @@ def do_shell():
                     if key == "ls_prop": p.levelset_propagation = float(val)
                     if key == "ratio": p.flow_ext_ratio = float(val)
                     if key == "split": p.split_patches = (val.lower() == "true")
+                    if key == "sac_ratio": p.sac_bulge_ratio = float(val)
 
             else:
                 console.print(f"[red]Unknown command:[/red] {cmd}")

@@ -57,7 +57,3 @@ Thumbs.db
 .gemini/
 Miniforge3.sh
 
-# Internal notes (not for public repo)
-LLM.md
-Instructions.md
-plan.md
