@@ -31,9 +31,10 @@ from vortex.pipeline.flow_extensions import add_flow_extensions
 from vortex.pipeline.exporter import export_stl
 from vortex.pipeline.mesh_quality import check_mesh_quality, extract_bad_triangles
 from vortex.pipeline.sac_clipping import clip_aneurysm_sac
+from vortex.ui import dashboard
 
 log = get_logger(__name__)
-console = Console()
+console = Console(theme=dashboard.THEME)
 
 # ---------------------------------------------------------------------------
 # Session State (for Shell mode)
@@ -53,6 +54,7 @@ class Session:
         self.parent_vessel: Any = None     # parent vessel wall (from clip-sac)
         self.neck_plane: dict = None       # {'origin': [...], 'normal': [...]}
         self.seed_mm: Optional[tuple] = None  # (x,y,z) mm — set by set-seed or DICOM seed
+        self.clip_sac_view: Optional[dict] = None  # cached clip-sac context for the dashboard panel
         self.params: PipelineParams = PipelineParams()
 
 session = Session()
@@ -495,21 +497,59 @@ def do_process(args):
 # ---------------------------------------------------------------------------
 
 def do_shell():
-    display_welcome()
-    show_status_dashboard(session)
-    console.print("[dim]Type 'help' for commands, 'exit' to quit.[/dim]\n")
-
     from prompt_toolkit import PromptSession
-    from prompt_toolkit.completion import WordCompleter
+    from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
+    from prompt_toolkit.history import InMemoryHistory
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.application import run_in_terminal
+    from prompt_toolkit.formatted_text import HTML
     import shlex
 
-    commands = ["load", "load-mesh", "list", "seed", "set-seed", "segment", "mesh", "check", "centerlines", "extend", "clip-sac", "export", "export-mask", "status", "params", "metrics", "help", "exit"]
-    completer = WordCompleter(commands, ignore_case=True)
-    ps = PromptSession(completer=completer)
+    # State-aware completer: suggest the valid next commands first, given where
+    # the session is in the pipeline (dashboard.next_commands), then fall back to
+    # the always-available commands. Only completes the leading command word.
+    class NextCommandCompleter(Completer):
+        def get_completions(self, document, complete_event):
+            if " " in document.text_before_cursor.lstrip():
+                return  # typing arguments — don't suggest commands
+            word = document.get_word_before_cursor(WORD=True).lower()
+            for cmd in dashboard.next_commands(session):
+                if cmd.startswith(word):
+                    yield Completion(cmd, start_position=-len(word))
+
+    # Key bindings: Tab accepts the history auto-suggestion when one exists,
+    # otherwise opens normal completion; F1 reprints the status panel.
+    kb = KeyBindings()
+
+    @kb.add("c-i")  # Tab
+    def _(event):
+        buf = event.current_buffer
+        suggestion = buf.suggestion
+        if suggestion and suggestion.text:
+            buf.insert_text(suggestion.text)
+        else:
+            buf.start_completion(select_first=False)
+
+    @kb.add("f1")
+    def _(event):
+        run_in_terminal(lambda: console.print(dashboard.render_status(session)))
+
+    ps = PromptSession(
+        completer=NextCommandCompleter(),
+        auto_suggest=AutoSuggestFromHistory(),
+        history=InMemoryHistory(),
+        key_bindings=kb,
+    )
+    prompt_msg = HTML('<b><style fg="#5fc6d8">vortex › </style></b>')
+    hint = HTML('<style fg="#8a8470">tab ⇥ accepts suggestion · '
+                '? for commands · F1 status</style>')
 
     while True:
+        # Scrollback dashboard: clear + redraw the panels above the prompt each turn.
+        dashboard.render_dashboard(console, session)
         try:
-            text = ps.prompt("vortex> ").strip()
+            text = ps.prompt(prompt_msg, bottom_toolbar=hint).strip()
             if not text: continue
 
             try:
@@ -520,6 +560,8 @@ def do_shell():
 
             if not parts: continue
             cmd = parts[0].lower()
+            if cmd == "?":
+                cmd = "help"
 
             if cmd == "exit":
                 break
@@ -808,6 +850,16 @@ def do_shell():
                     session.sac_surface  = result['sac']
                     session.parent_vessel = result['parent']
                     session.neck_plane   = result['neck_plane']
+
+                    # Cache context for the persistent CLIP-SAC dashboard panel
+                    # (re-rendered each turn; --ratio re-runs move the cut marker).
+                    session.clip_sac_view = {
+                        'stats':        result['stats'],
+                        'ratio':        result['ratio'],
+                        'dome_cells':   session.sac_surface.GetNumberOfCells(),
+                        'parent_cells': session.parent_vessel.GetNumberOfCells(),
+                        'heatmap_path': os.path.abspath("sac_bulge_heatmap.ply"),
+                    }
 
                     # Write the bulge-field heatmap for visual inspection / tuning.
                     # NOTE: this is a DIAGNOSTIC file only — not part of the CFD export.

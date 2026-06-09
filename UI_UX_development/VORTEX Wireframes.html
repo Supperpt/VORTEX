@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VORTEX — UI Wireframes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Kalam:wght@300;400;700&family=Caveat:wght@400;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="wireframe.css" rel="stylesheet">
+</head>
+<body>
+
+<!-- ================= TOP CHROME ================= -->
+<div class="topbar">
+  <div class="brand">
+    <span class="mark">V<b>O</b>RTEX</span>
+    <span class="sub">UI&nbsp;Wireframes</span>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="a"><span class="n">A</span>Mission Control</button>
+    <button class="tab" data-tab="b"><span class="n">B</span>Polished TUI</button>
+    <button class="tab" data-tab="c"><span class="n">C</span>Focus Stage</button>
+    <button class="tab" data-tab="d"><span class="n">D</span>Pipeline Graph</button>
+  </nav>
+  <div class="spacer"></div>
+  <button class="tweak-btn" id="tweakBtn">✎ Tweaks</button>
+</div>
+
+<!-- ================= TWEAKS ================= -->
+<div id="tweakPanel" style="display:none;position:fixed;top:64px;right:22px;z-index:40;width:230px;padding:16px"
+     class="sk monitor">
+  <div class="lbl" style="margin-bottom:12px">Wireframe tweaks</div>
+  <label class="row" style="justify-content:space-between;margin-bottom:12px;cursor:pointer">
+    <span class="tiny h">Hand-drawn lines</span>
+    <span class="toggle on" id="tw-sketch"><i></i></span>
+  </label>
+  <label class="row" style="justify-content:space-between;margin-bottom:12px;cursor:pointer">
+    <span class="tiny h">Show annotations</span>
+    <span class="toggle on" id="tw-notes"><i></i></span>
+  </label>
+  <div class="tiny h" style="margin-bottom:6px">Accent</div>
+  <div class="row" style="gap:8px;margin-bottom:14px" id="tw-accent">
+    <span class="sw" data-c="#1f7a8c" style="width:24px;height:24px;border:2px solid var(--line);border-radius:50%;background:#1f7a8c;cursor:pointer"></span>
+    <span class="sw" data-c="#3f6f8f" style="width:24px;height:24px;border:2px solid var(--line);border-radius:50%;background:#3f6f8f;cursor:pointer"></span>
+    <span class="sw" data-c="#5a7d57" style="width:24px;height:24px;border:2px solid var(--line);border-radius:50%;background:#5a7d57;cursor:pointer"></span>
+    <span class="sw" data-c="#7a5aa0" style="width:24px;height:24px;border:2px solid var(--line);border-radius:50%;background:#7a5aa0;cursor:pointer"></span>
+  </div>
+  <div class="tiny muted" style="font-size:11px">These adjust the sketch render only — not the eventual product UI.</div>
+</div>
+
+<div class="stage">
+
+<!-- ============================================================
+     APPROACH A — MISSION CONTROL
+     ============================================================ -->
+<section class="panel active" id="panel-a">
+  <div class="lead">
+    <div class="kicker">Approach A · Desktop</div>
+    <h2>Mission Control <span class="form">3-pane workstation</span></h2>
+    <p>The dense, pro-tool layout. A persistent <b>workflow rail</b> on the left always shows the optimal path and where you are; the <b>3D viewport</b> owns the center; a <b>contextual panel</b> on the right shows only the parameters for the step you're on; a <b>console strip</b> mirrors the equivalent CLI command — the bridge for terminal users. Shown at the <i>clip-sac tune-and-look</i> moment.</p>
+  </div>
+
+  <div class="monitor">
+    <div class="titlebar">
+      <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <span class="t">vortex — edited_vessel.stl</span>
+      <span class="right">
+        <span>mode</span>
+        <span class="seg"><span class="on">CFD</span><span>FSI</span><span>solid</span></span>
+        <span>split-patches ✓</span>
+      </span>
+    </div>
+
+    <div style="display:grid;grid-template-columns:248px 1fr 270px;min-height:560px">
+
+      <!-- LEFT: workflow rail -->
+      <div style="border-right:2px solid var(--line);padding:14px 12px;position:relative">
+        <span class="badge fl" style="top:10px;left:200px">1</span>
+        <div class="phase-lbl">Phase 1 · DICOM → raw STL</div>
+        <div class="step done"><span class="num">✓</span><span class="name">Load DICOM</span></div>
+        <div class="step done"><span class="num">✓</span><span class="name">Seed</span></div>
+        <div class="step done"><span class="num">✓</span><span class="name">Segment</span></div>
+        <div class="step done"><span class="num">✓</span><span class="name">Mesh</span></div>
+
+        <div class="phase-lbl ext">↘ External edit (MeshLab)</div>
+        <div class="step done"><span class="num">✓</span><span class="name">Export raw</span></div>
+        <div class="step done"><span class="num">✓</span><span class="name">Load-mesh</span></div>
+
+        <div class="phase-lbl">Phase 3 · CFD prep</div>
+        <div class="step done"><span class="num">✓</span><span class="name">Centerlines</span></div>
+        <div class="step done"><span class="num">✓</span><span class="name">Extend</span></div>
+        <div class="step done"><span class="num">✓</span><span class="name">Set-seed</span></div>
+        <div class="step active"><span class="num">9</span><span class="name">Clip-sac</span><span class="cmd">tuning</span></div>
+        <div class="step todo"><span class="num">10</span><span class="name">Check</span></div>
+        <div class="step todo"><span class="num">11</span><span class="name">Export</span></div>
+      </div>
+
+      <!-- CENTER: viewport -->
+      <div class="col" style="position:relative">
+        <span class="badge fl" style="top:12px;left:14px">2</span>
+        <div class="row" style="justify-content:space-between;padding:9px 14px;border-bottom:2px solid var(--line)">
+          <div class="row" style="gap:6px">
+            <span class="chip on">heatmap</span><span class="chip">centerlines</span><span class="chip">wireframe</span><span class="chip">caps</span>
+          </div>
+          <div class="row" style="gap:6px">
+            <span class="chip">⟲ reset view</span><span class="chip">⤢ fit</span>
+          </div>
+        </div>
+        <div class="viewport" style="flex:1;min-height:380px">
+          <div class="col" style="align-items:center;gap:12px">
+            <div class="vp-tag">[ 3D mesh · bulge heatmap ]</div>
+            <div class="tiny muted" style="max-width:230px;text-align:center">dome region renders red · healthy wall blue · seed marker shown on the dome</div>
+          </div>
+        </div>
+        <div style="border-top:2px solid var(--line);padding:7px 14px;background:#1c1b17;color:#d8d2c2;font-family:var(--mono-font);font-size:11.5px">
+          <span style="color:#8a8470">vortex ›</span> clip-sac --ratio 2.5
+          &nbsp; <span style="color:#7fb98a">dome 3,120 · parent 18,400 · wrote sac_bulge_heatmap.ply</span>
+        </div>
+      </div>
+
+      <!-- RIGHT: contextual params -->
+      <div style="border-left:2px solid var(--line);padding:14px 14px;position:relative">
+        <span class="badge fl" style="top:10px;right:14px">3</span>
+        <div class="lbl" style="margin-bottom:2px">Step parameters</div>
+        <div class="h" style="font-size:18px;margin-bottom:12px">Clip-sac</div>
+
+        <div class="row" style="justify-content:space-between"><span class="tiny h">Bulge ratio</span><span class="chip on">2.50</span></div>
+        <div class="slider" style="margin:8px 0 4px">
+          <div class="track" style="position:relative">
+            <div class="fillbar" style="width:62%"></div>
+          </div>
+        </div>
+        <div class="row" style="justify-content:space-between;font-family:var(--mono-font);font-size:10px;color:var(--ink-faint)">
+          <span>1.0 neck</span><span>apex 5.8</span>
+        </div>
+        <div class="note" style="margin:6px 0 12px">try p90–p99 → here ~2.5 ✦</div>
+
+        <div class="lbl">Field stats</div>
+        <table class="sk-t" style="margin:6px 0 14px">
+          <tr><td>median</td><td style="text-align:right">1.19</td></tr>
+          <tr><td>p90</td><td style="text-align:right">2.25</td></tr>
+          <tr><td>p99</td><td style="text-align:right">4.75</td></tr>
+          <tr><td>max</td><td style="text-align:right">5.81</td></tr>
+        </table>
+
+        <div class="lbl">Heatmap legend</div>
+        <div class="ramp" style="margin:7px 0 3px"></div>
+        <div class="row" style="justify-content:space-between;font-family:var(--mono-font);font-size:10px;color:var(--ink-faint)">
+          <span>parent</span><span>dome</span>
+        </div>
+
+        <hr class="sk-hr">
+        <div class="row" style="gap:8px">
+          <button class="btn sm">Re-run</button>
+          <button class="btn sm primary">Accept → Check</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div class="li"><span class="badge">1</span><span>Workflow rail = the "optimal path." Phases grouped; the external-edit hop is marked but you can still click any step (free-form).</span></div>
+    <div class="li"><span class="badge">2</span><span>Viewport toggles (heatmap / centerlines / caps) live on its own toolbar; nothing leaves the canvas.</span></div>
+    <div class="li"><span class="badge">3</span><span>Right panel is purely contextual — it always shows the current step. Seed-pick, params, export each reuse this slot.</span></div>
+  </div>
+</section>
+
+<!-- ============================================================
+     APPROACH B — POLISHED TUI
+     ============================================================ -->
+<section class="panel" id="panel-b">
+  <div class="lead">
+    <div class="kicker">Approach B · Terminal</div>
+    <h2>Polished TUI <span class="form">stateful terminal dashboard</span></h2>
+    <p>Stays CLI-native — no GL, no window-server fragility — but gives the shell a real dashboard. A persistent <b>status table</b>, the pipeline drawn as a <b>state machine</b>, the <i>clip-sac</i> stats rendered with an ASCII bulge heatmap, and a command line with ghosted suggestions. This is the safest home given the README's X11/Wayland history.</p>
+  </div>
+
+  <div class="monitor tui">
+    <div class="titlebar" style="background:#26241e;border-color:#4a463b">
+      <span class="dot" style="border-color:#6a6452"></span><span class="dot" style="border-color:#6a6452"></span><span class="dot" style="border-color:#6a6452"></span>
+      <span class="t" style="color:#8a8470">vortex shell — edited_vessel.stl</span>
+    </div>
+    <div style="padding:16px 18px;position:relative">
+      <span class="badge fl" style="top:12px;right:16px">1</span>
+
+      <!-- status + pipeline row -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:14px">
+        <div class="box">
+          <div class="panel-title">─ SESSION STATUS ───────────</div>
+<span class="tline">  DICOM       <span class="ok">✓ loaded</span>  584 slc</span>
+<span class="tline">  Seed        <span class="ok">✓ set</span>     38.2 41.0 12.7</span>
+<span class="tline">  Mask        <span class="g">— (load-mesh)</span></span>
+<span class="tline">  Surface     <span class="ok">✓</span> 99,184 pts</span>
+<span class="tline">  Centerlines <span class="ok">✓</span> 2 openings</span>
+<span class="tline">  Caps        <span class="ok">✓</span> extended</span>
+        </div>
+        <div class="box" style="position:relative">
+          <span class="badge fl" style="top:-9px;left:10px">2</span>
+          <div class="panel-title">─ PIPELINE ─────────────────</div>
+<span class="tline"><span class="ok">load</span> › <span class="ok">seed</span> › <span class="ok">segment</span> › <span class="ok">mesh</span></span>
+<span class="tline">   └→ <span class="r">[edit ext.]</span> → <span class="ok">load-mesh</span></span>
+<span class="tline"><span class="ok">centerlines</span> › <span class="ok">extend</span> › <span class="ok">set-seed</span></span>
+<span class="tline"> » <span class="a"><b>clip-sac</b></span> › <span class="g">check</span> › <span class="g">export</span></span>
+<span class="tline" style="color:#8a8470">         ▲ you are here</span>
+        </div>
+      </div>
+
+      <!-- clip-sac stats + heatmap -->
+      <div class="box" style="margin-bottom:14px;position:relative">
+        <span class="badge fl" style="top:-9px;left:10px">3</span>
+        <div class="panel-title">─ CLIP-SAC · ratio 2.50 ───────────────────────────</div>
+<span class="tline">  Bulge median / p90 / p99 / max   <b>1.19 / 2.25 / 4.75 / 5.81</b></span>
+<span class="tline">  Dome cells   <span class="a">3,120</span>      Parent cells   <span class="a">18,400</span></span>
+<span class="tline">  </span>
+<span class="tline">  bulge field   <span class="a">1.0</span> <span class="tui-heat"><span class="a">░░░░</span><span class="ok">▒▒▒▒</span><span class="y">▓▓▓▓</span><span class="r">████</span></span> <span class="r">5.8</span></span>
+<span class="tline" style="color:#8a8470">                neck ········· dome apex</span>
+<span class="tline">  </span>
+<span class="tline" style="color:#8a8470">  wrote sac_bulge_heatmap.ply  (diagnostic — open in MeshLab)</span>
+      </div>
+
+      <!-- command line -->
+      <div style="position:relative">
+        <span class="badge fl" style="top:-2px;right:16px">4</span>
+<span class="tline prompt"><b>vortex ›</b> export aneurysm_cfd.stl<span class="cursor">&nbsp;</span></span>
+<span class="tline" style="color:#8a8470">          tab ⇥ accepts suggestion · ? for commands · F1 status</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div class="li"><span class="badge">1</span><span>Status dashboard is always visible (the README's existing concept) — what's in memory at a glance.</span></div>
+    <div class="li"><span class="badge">2</span><span>Pipeline as a state machine shows the optimal order + the external-edit detour, with a "you are here" marker.</span></div>
+    <div class="li"><span class="badge">3</span><span>The tune-and-look loop becomes an inline ASCII heatmap + live stats — no need to leave the terminal to reason about the ratio.</span></div>
+    <div class="li"><span class="badge">4</span><span>Single command line with autosuggest; everything is still one keystroke for power users.</span></div>
+  </div>
+</section>
+
+<!-- ============================================================
+     APPROACH C — FOCUS STAGE
+     ============================================================ -->
+<section class="panel" id="panel-c">
+  <div class="lead">
+    <div class="kicker">Approach C · Desktop</div>
+    <h2>Focus Stage <span class="form">calm, one-thing-at-a-time</span></h2>
+    <p>The clinical, low-anxiety option. A <b>full-bleed canvas</b>, a single floating <b>workflow stepper</b> up top (progress, not a menu), and just the controls the current step needs floating in — big targets, advanced params tucked behind a disclosure. Shown at the <i>seed picking</i> moment; calmer for the clinician side of a mixed audience.</p>
+  </div>
+
+  <div class="monitor">
+    <div class="titlebar">
+      <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <span class="t">vortex — seed the aneurysm</span>
+      <span class="right"><span>step 2 of 11</span></span>
+    </div>
+
+    <div class="viewport" style="min-height:560px;position:relative;align-items:stretch;justify-content:stretch">
+
+      <!-- floating stepper -->
+      <div class="sk monitor" style="position:absolute;top:16px;left:50%;transform:translateX(-50%);
+            display:flex;align-items:center;gap:4px;padding:8px 14px;box-shadow:4px 5px 0 rgba(35,33,28,.12);z-index:6">
+        <span class="badge fl" style="top:-10px;left:-10px">1</span>
+        <span class="chip">Load</span>
+        <span class="muted">›</span>
+        <span class="chip on" style="font-weight:700;border-width:2px">● Seed</span>
+        <span class="muted">›</span>
+        <span class="chip">Segment</span><span class="muted">›</span><span class="chip">Mesh</span>
+        <span class="muted" style="margin:0 4px">···</span>
+        <span class="chip">Clip-sac</span><span class="muted">›</span><span class="chip">Export</span>
+      </div>
+
+      <!-- hint banner -->
+      <div style="position:absolute;top:80px;left:50%;transform:translateX(-50%);z-index:6"
+           class="sk fill" >
+        <div class="row" style="padding:9px 16px;gap:10px">
+          <span class="note" style="font-size:22px">✦</span>
+          <span class="h tiny">Rotate with the mouse, hover the aneurysm dome, then press&nbsp; <span class="chip" style="font-family:var(--mono-font)">P</span> &nbsp;to place the seed</span>
+        </div>
+      </div>
+
+      <!-- center crosshair / marker -->
+      <div style="position:absolute;top:52%;left:50%;transform:translate(-50%,-50%);text-align:center;z-index:5">
+        <div class="vp-tag" style="margin-bottom:8px">[ 3D vessel mesh ]</div>
+        <div style="width:18px;height:18px;border:2px solid var(--note);border-radius:50%;margin:0 auto;position:relative">
+          <div style="position:absolute;inset:-8px;border-left:1.5px solid var(--note);left:50%"></div>
+        </div>
+        <div class="note" style="margin-top:8px">seed marker</div>
+        <span class="badge fl" style="top:-4px;left:90px">2</span>
+      </div>
+
+      <!-- minimal floating controls bottom -->
+      <div style="position:absolute;bottom:18px;left:50%;transform:translateX(-50%);z-index:6"
+           class="sk monitor">
+        <div class="row" style="padding:8px 12px;gap:8px">
+          <span class="chip">⟲ reset</span><span class="chip">⤢ fit</span>
+          <span style="width:1px;height:18px;background:var(--ink-faint)"></span>
+          <button class="btn sm">Set by coords</button>
+          <button class="btn sm primary">Confirm seed →</button>
+        </div>
+      </div>
+
+      <!-- advanced disclosure -->
+      <div style="position:absolute;bottom:18px;right:18px;z-index:6" class="sk monitor">
+        <div class="row" style="padding:8px 12px;gap:8px">
+          <span class="badge fl" style="top:-10px;left:-10px">3</span>
+          <span class="tiny h">Advanced params</span>
+          <span class="muted tiny">▸</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div class="li"><span class="badge">1</span><span>Workflow is a slim progress stepper, not a dense menu — it signals the optimal order without dominating. Click to jump (still free-form).</span></div>
+    <div class="li"><span class="badge">2</span><span>The canvas is the whole screen. Each step's primary action happens directly on the mesh with a one-line hint.</span></div>
+    <div class="li"><span class="badge">3</span><span>Power doesn't disappear — HU thresholds, ROI, level-set live behind "Advanced params" so beginners aren't overwhelmed.</span></div>
+  </div>
+</section>
+
+<!-- ============================================================
+     APPROACH D — PIPELINE GRAPH
+     ============================================================ -->
+<section class="panel" id="panel-d">
+  <div class="lead">
+    <div class="kicker">Approach D · Desktop</div>
+    <h2>Pipeline Graph <span class="form">spatial node canvas</span></h2>
+    <p>The whole pipeline as a <b>flow of connected nodes</b> — you see the entire state and data dependencies at once. Arrows encode the optimal order (the external-edit hop is a dashed detour out and back); click any node to expand its <b>inspector</b> with params + a preview thumbnail. Run nodes in any order — the graph just shows what's stale. Shown with the <i>Segment</i> node selected.</p>
+  </div>
+
+  <div class="monitor">
+    <div class="titlebar">
+      <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+      <span class="t">vortex — pipeline graph</span>
+      <span class="right"><span>autosave ✓</span><span>fit ⤢</span></span>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 280px;min-height:560px">
+      <!-- canvas -->
+      <div style="position:relative;padding:24px;background-image:radial-gradient(rgba(35,33,28,.10) 1.4px,transparent 1.4px);background-size:22px 22px;overflow:hidden">
+        <svg style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none" stroke="var(--ink-soft)" stroke-width="2" fill="none">
+          <path d="M 150 92 C 185 92, 185 92, 215 92" marker-end="url(#ar)"/>
+          <path d="M 150 192 C 185 192, 185 192, 215 192" marker-end="url(#ar)"/>
+          <path d="M 110 122 C 110 160, 110 160, 110 182" marker-end="url(#ar)"/>
+          <path d="M 305 122 L 305 250" stroke-dasharray="6 5" stroke="var(--note)" marker-end="url(#arn)"/>
+          <defs>
+            <marker id="ar" markerWidth="9" markerHeight="9" refX="6" refY="4.5" orient="auto"><path d="M1,1 L7,4.5 L1,8" stroke="var(--ink-soft)"/></marker>
+            <marker id="arn" markerWidth="9" markerHeight="9" refX="6" refY="4.5" orient="auto"><path d="M1,1 L7,4.5 L1,8" stroke="var(--note)"/></marker>
+          </defs>
+        </svg>
+
+        <!-- row 1 -->
+        <div style="position:absolute;top:64px;left:24px" class="gnode done">
+          <div class="gt">Load DICOM</div><div class="gs">584 slices · CTA</div>
+        </div>
+        <div style="position:absolute;top:64px;left:215px" class="gnode active">
+          <span class="badge fl" style="top:-10px;left:-10px">1</span>
+          <div class="gt">Segment</div><div class="gs">HU 150–400 · seeded</div>
+          <div class="thumb"></div>
+        </div>
+        <div style="position:absolute;top:64px;left:405px" class="gnode done">
+          <div class="gt">Mesh</div><div class="gs">99,184 pts</div>
+        </div>
+
+        <!-- external detour -->
+        <div style="position:absolute;top:250px;left:248px" class="gnode dash">
+          <div class="gt" style="color:var(--note)">↗ Edit externally</div>
+          <div class="gs">MeshLab / Meshmixer</div>
+        </div>
+        <span class="note" style="position:absolute;top:228px;left:330px">export ↘ &nbsp; ↗ load-mesh</span>
+
+        <!-- row 2 -->
+        <div style="position:absolute;top:360px;left:24px" class="gnode done"><div class="gt">Centerlines</div><div class="gs">2 openings</div></div>
+        <div style="position:absolute;top:360px;left:215px" class="gnode done"><div class="gt">Extend</div><div class="gs">flow ext ×5</div></div>
+        <div style="position:absolute;top:360px;left:405px" class="gnode todo">
+          <span class="badge fl" style="top:-10px;left:-10px">2</span>
+          <div class="gt">Clip-sac</div><div class="gs">ratio 1.4 · stale</div>
+        </div>
+        <div style="position:absolute;top:460px;left:215px" class="gnode todo"><div class="gt">Check</div><div class="gs">—</div></div>
+        <div style="position:absolute;top:460px;left:405px" class="gnode todo"><div class="gt">Export CFD</div><div class="gs">split-patches</div></div>
+
+        <svg style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none" stroke="var(--ink-soft)" stroke-width="2" fill="none">
+          <path d="M 150 392 L 215 392"/>
+          <path d="M 405 392 L 360 392" stroke-dasharray="5 5"/>
+        </svg>
+      </div>
+
+      <!-- inspector -->
+      <div style="border-left:2px solid var(--line);padding:16px 16px;position:relative">
+        <span class="badge fl" style="top:10px;right:14px">3</span>
+        <div class="lbl">Inspector · node</div>
+        <div class="h" style="font-size:18px;margin:2px 0 4px">Segment</div>
+        <div class="tiny muted" style="margin-bottom:14px">DICOM volume → seeded mask</div>
+
+        <div class="lbl">HU threshold</div>
+        <div class="row" style="justify-content:space-between;margin:6px 0"><span class="tiny">lower</span><span class="chip">150</span></div>
+        <div class="slider"><div class="track"><div class="fillbar" style="width:38%"></div></div></div>
+        <div class="row" style="justify-content:space-between;margin:10px 0 6px"><span class="tiny">upper</span><span class="chip">400</span></div>
+        <div class="slider"><div class="track"><div class="fillbar" style="width:78%"></div></div></div>
+
+        <hr class="sk-hr">
+        <div class="row" style="justify-content:space-between;margin-bottom:8px"><span class="tiny h">Resample ×</span><span class="chip">2.0</span></div>
+        <div class="row" style="justify-content:space-between;margin-bottom:8px"><span class="tiny h">ROI radius</span><span class="chip">50 mm</span></div>
+        <label class="row" style="justify-content:space-between;cursor:pointer"><span class="tiny h">Level-set refine</span><span class="toggle"><i></i></span></label>
+
+        <hr class="sk-hr">
+        <div class="col" style="gap:8px">
+          <div class="thumb" style="height:84px;border:1.5px solid var(--ink-faint);border-radius:8px;
+            background:repeating-linear-gradient(45deg,transparent,transparent 8px,rgba(35,33,28,.06) 8px,rgba(35,33,28,.06) 9px);
+            display:flex;align-items:center;justify-content:center" >
+            <span class="vp-tag">[ mask preview ]</span>
+          </div>
+          <button class="btn primary" style="width:100%">Run segment ▸</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div class="li"><span class="badge">1</span><span>Every step is a node showing its key output + status (done / active / stale). The whole pipeline state is legible at a glance.</span></div>
+    <div class="li"><span class="badge">2</span><span>Arrows = optimal data flow; the dashed red detour is the external-edit hop. Change an upstream node and downstream nodes mark "stale."</span></div>
+    <div class="li"><span class="badge">3</span><span>Selecting a node opens its inspector (params + preview). The 3D viewport opens fullscreen from any node's thumbnail.</span></div>
+  </div>
+</section>
+
+</div><!-- /stage -->
+
+<script src="wireframe.js"></script>
+</body>
+</html>
