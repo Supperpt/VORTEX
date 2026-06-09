@@ -153,6 +153,9 @@ def next_commands(session) -> list:
     """
     cur = current_step(session)
     ordered = [cur]
+    # After a clip, inspecting it is the highest-value next action.
+    if _has_sac(session):
+        ordered.append("view")
     # Reasonable follow-ons from the current state.
     if _has_surface(session):
         for c in ("check", "centerlines", "extend", "clip-sac", "export", "metrics"):

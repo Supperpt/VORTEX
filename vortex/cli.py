@@ -52,6 +52,7 @@ class Session:
         self.final_surface: Any = None
         self.sac_surface: Any = None       # aneurysm dome (from clip-sac)
         self.parent_vessel: Any = None     # parent vessel wall (from clip-sac)
+        self.bulge_surface: Any = None     # wall with BulgeRatio scalar (for 'view')
         self.neck_plane: dict = None       # {'origin': [...], 'normal': [...]}
         self.seed_mm: Optional[tuple] = None  # (x,y,z) mm — set by set-seed or DICOM seed
         self.clip_sac_view: Optional[dict] = None  # cached clip-sac context for the dashboard panel
@@ -580,6 +581,7 @@ def do_shell():
                     "  [cyan]centerlines[/cyan]             Compute centerlines\n"
                     "  [cyan]extend[/cyan]                  Add flow extensions & cap\n"
                     "  [cyan]clip-sac [--ratio N][/cyan]   Split wall into dome + parent via centerline bulge field (writes heatmap)\n"
+                    "  [cyan]view [bulge][/cyan]            Inspect clip-sac in the terminal: rotatable braille preview of dome+cut (or bulge heatmap)\n"
                     "  [cyan]check[/cyan]                        Check mesh quality (manifold, holes, triangle quality)\n"
                     "  [cyan]check --deep[/cyan]                 Also run self-intersection detection (slow)\n"
                     "  [cyan]check --export-bad bad.stl[/cyan]   Export bad triangles (AR>20) to STL\n"
@@ -850,6 +852,7 @@ def do_shell():
                     session.sac_surface  = result['sac']
                     session.parent_vessel = result['parent']
                     session.neck_plane   = result['neck_plane']
+                    session.bulge_surface = result['bulge_surface']  # for 'view' heatmap mode
 
                     # Cache context for the persistent CLIP-SAC dashboard panel
                     # (re-rendered each turn; --ratio re-runs move the cut marker).
@@ -897,6 +900,18 @@ def do_shell():
                     session.params.split_patches = True
                     console.print("[green]split_patches automatically enabled.[/green] "
                                   "Next 'export' will write aneurysm_dome.stl + parent_vessel.stl + cap_N.stl.")
+
+            elif cmd in ("view", "preview", "inspect"):
+                if session.sac_surface is None:
+                    console.print(
+                        "[vortex.dim]Nothing to preview yet — run [vortex.accent]clip-sac[/vortex.accent] "
+                        "first, then [vortex.accent]view[/vortex.accent] to inspect the dome and "
+                        "neck cut in the terminal.[/vortex.dim]"
+                    )
+                else:
+                    mode = "bulge" if (len(parts) > 1 and parts[1].lower().startswith("bulge")) else "dome"
+                    from vortex.ui.mesh_preview import run_viewer
+                    run_viewer(console, session, mode=mode)
 
             elif cmd == "metrics":
                 if session.surface is None:
