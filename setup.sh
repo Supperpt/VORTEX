@@ -86,8 +86,9 @@ if command -v dnf &>/dev/null; then
 elif command -v apt-get &>/dev/null; then
     echo "[1/4] Installing system packages (Ubuntu/Debian, requires sudo)..."
     sudo apt-get install -y \
-        libgl1-mesa-glx \
-        libxt6 \
+        libgl1 \
+        libglu1-mesa \
+        libxt6t64 \
         libxrender1 \
         libxcb-keysyms1 \
         libxcb-render-util0 \
@@ -110,8 +111,8 @@ if $CONDA_BIN env list | grep -q "^${ENV_NAME} "; then
     echo "    Environment '$ENV_NAME' already exists — skipping creation."
     echo "    To recreate: conda env remove -n $ENV_NAME && bash setup.sh"
 else
-    echo "    Creating environment with Python 3.10..."
-    $CONDA_BIN create -y -n "$ENV_NAME" python=3.10
+    echo "    Creating environment with Python 3.9..."
+    $CONDA_BIN create -y -n "$ENV_NAME" python=3.9
 
     echo "    Installing vmtk from conda-forge (large download, ~1 GB, please wait)..."
     $CONDA_BIN install -y -n "$ENV_NAME" -c vmtk -c conda-forge vmtk
