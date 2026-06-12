@@ -46,6 +46,7 @@ output.stl
 # Clinical Data (Privacy)
 DICOM/
 dicom/
+STLs/
 *.dcm
 *.DCM
 
