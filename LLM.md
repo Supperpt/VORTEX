@@ -201,6 +201,24 @@ Configured `vmtkCapper` to output `CellEntityIds`:
 - **Output**: Sets `session.seed_mm`. CLI mode prints coordinate and optionally writes JSON. Shell shows a suggestion to verify with `pick-seed` if the result looks wrong.
 - **Limitation**: May misidentify a vessel segment if the mesh contains large non-aneurysmal bulges. Always verify the detected point before relying on `clip-sac` output.
 
+### 19. `export` Command — Missing `.stl` Extension & Wrong Output Directory
+
+**Problem 1 — missing `.stl` extension**: When the user ran `export mymodel` (no extension), the file was written without the `.stl` suffix.
+- **Fix**: `export_stl()` in `vortex/pipeline/exporter.py` already guards with `if not os.path.splitext(path)[1]: path += ".stl"`. Confirmed present.
+
+**Problem 2 — directory path mangled**: When the user ran `export path/to/directory` (an existing directory or a path ending with `/`), `os.path.splitext` returned `""` for the extension, so `.stl` was appended directly to the directory path (e.g. `path/to/directory.stl`) instead of writing inside it.
+- **Fix** (`vortex/pipeline/exporter.py`): Added a directory check *before* the extension check:
+  ```python
+  if os.path.isdir(path) or path.endswith('/') or path.endswith(os.sep):
+      os.makedirs(path, exist_ok=True)
+      path = os.path.join(path, "output.stl")
+  elif not os.path.splitext(path)[1]:
+      path = path + ".stl"
+  ```
+
+**Problem 3 — `sac_bulge_heatmap.ply` always written to CWD**: The heatmap was hardcoded to `os.path.abspath("sac_bulge_heatmap.ply")` during `clip-sac`, so when the user ran `export path/to/dir` the STL files went to `path/to/dir/` but the heatmap stayed in the program's working directory.
+- **Fix** (`vortex/cli.py`, `export` command): After `export_stl` returns the resolved output path, if `session.bulge_surface` is set (i.e. `clip-sac` was run), the heatmap is re-written to the same directory as the exported STLs. The immediate post-`clip-sac` write to CWD is preserved for quick diagnostic inspection.
+
 ---
 
 ## ⚠️ Known Issues for Future LLMs

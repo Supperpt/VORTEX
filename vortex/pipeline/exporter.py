@@ -48,6 +48,11 @@ def export_stl(
             progress_cb(pct, msg)
         log.debug("[%3d%%] %s", pct, msg)
 
+    if os.path.isdir(path) or path.endswith('/') or path.endswith(os.sep):
+        os.makedirs(path, exist_ok=True)
+        path = os.path.join(path, "output.stl")
+    elif not os.path.splitext(path)[1]:
+        path = path + ".stl"
     os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
 
     if params.solid:

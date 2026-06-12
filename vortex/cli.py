@@ -947,11 +947,21 @@ def do_shell():
                     console.print("[red]Nothing to export.[/red]")
                 else:
                     path = parts[1] if len(parts) > 1 else "output.stl"
-                    run_pipeline_step("Exporting STL", export_stl,
+                    out_path = run_pipeline_step("Exporting STL", export_stl,
                                       session.final_surface, path, session.params,
                                       sac_surface=session.sac_surface,
                                       parent_surface=session.parent_vessel,
                                       neck_plane=session.neck_plane)
+                    if session.bulge_surface is not None and out_path:
+                        from vortex.pipeline.sac_clipping import export_bulge_heatmap
+                        export_dir = os.path.dirname(os.path.abspath(out_path))
+                        heatmap_path = os.path.join(export_dir, "sac_bulge_heatmap.ply")
+                        try:
+                            export_bulge_heatmap(session.bulge_surface, heatmap_path)
+                            console.print(f"[cyan]Bulge heatmap (diagnostic):[/cyan] {heatmap_path} "
+                                          "[dim](inspect in MeshLab — dome=red, vessel=blue)[/dim]")
+                        except Exception as e:
+                            console.print(f"[yellow]Could not write heatmap: {e}[/yellow]")
 
             elif cmd == "export-mask":
                 if session.vtk_image is None:
