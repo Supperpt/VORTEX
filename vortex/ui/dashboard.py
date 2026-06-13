@@ -158,7 +158,7 @@ def next_commands(session) -> list:
         ordered.append("view")
     # Reasonable follow-ons from the current state.
     if _has_surface(session):
-        for c in ("check", "centerlines", "extend", "clip-sac", "export", "metrics"):
+        for c in ("check", "remesh", "centerlines", "extend", "clip-sac", "cap_label", "export", "metrics"):
             if c not in ordered:
                 ordered.append(c)
     if not _has_surface(session):

@@ -69,6 +69,7 @@ Save the result (e.g. `edited_vessel.stl`).
 
 ```
 load-mesh "edited_vessel.stl"   ← re-import the cleaned mesh
+remesh                          ← smooth + uniformly remesh for CFD quality (recommended; before centerlines)
 centerlines                     ← compute vessel centrelines
 extend                          ← add flow extensions + cap all openings
 set-seed X Y Z                  ← type the dome coordinate (get it from MeshLab/Meshmixer)
@@ -76,18 +77,55 @@ clip-sac                        ← split wall into dome + parent via the bulge 
                                    (writes sac_bulge_heatmap.ply; split_patches auto-on)
 clip-sac --ratio 2.5            ← re-tune from the printed stats until the split looks
                                    right (see "Tuning the --ratio" below)
+view                            ← press 'c' to overlay cap numbers; note which is the inlet
+cap_label                       ← label each cap inlet/outlet (i/o) for correct CFD export
 export aneurysm_cfd.stl         ← write all patches
 ```
 
-This produces, alongside the base file:
+This produces, in the export directory (bare names, matching vortex-cfd's default scheme):
 
 | File | Contents |
 |---|---|
-| `aneurysm_cfd_aneurysm_dome.stl` | Aneurysm dome surface |
-| `aneurysm_cfd_parent_vessel.stl` | Parent vessel wall **including flow extensions** |
-| `aneurysm_cfd_cap_2.stl`, `_cap_3.stl` … | Flat inlet/outlet caps |
-| `aneurysm_cfd_neck_plane.json` | Neck plane origin + normal |
+| `aneurysm.stl` | Aneurysm dome surface |
+| `wall.stl` | Parent vessel wall **including flow extensions** |
+| `inlet.stl`, `outlet_1.stl`, `outlet_2.stl` … | Flat caps, named from `cap_label` (unlabelled caps fall back to `cap_N.stl`) |
+| `neck_plane.json` | Neck plane origin + normal |
 | `sac_bulge_heatmap.ply` | Bulge-field heatmap (inspect/tune the clip) |
+
+#### Tuning the `remesh` parameters
+
+`remesh` is controlled by two `params` values. The goal is **uniform** triangles
+that still resolve the geometry — uniformity (not small size) is what removes the
+downstream snappyHexMesh skewness.
+
+**`remesh_edge_length`** (mm, key `edge`, default `0.25`, `0` = skip remeshing) —
+target uniform triangle edge length.
+- **Smaller** (e.g. `0.15`) → finer surface, more triangles, better curvature
+  capture on small domes/blebs; but larger STL, slower remesh, heavier CFD mesh.
+- **Larger** (e.g. `0.4–0.5`) → fewer triangles, faster; but if it exceeds the
+  local curvature scale it under-resolves the surface and **re-introduces skew**.
+- Rule of thumb: keep it **≤ the CFD near-wall cell size** (vortex-cfd refines to
+  ~0.125 mm at the wall), so snappyHexMesh has a smooth surface to snap to. For
+  ICA parent vessels (~3–5 mm Ø) `0.2–0.3 mm` works well; drop to `0.15–0.2 mm`
+  for small/complex domes, raise toward `0.4 mm` to keep cell counts down.
+
+**`remesh_smooth_iterations`** (key `smooth`, default `20`, `0` = skip smoothing) —
+Taubin smoothing passes applied before remeshing (volume-preserving, so the
+aneurysm is not shrunk).
+- **More** (e.g. `30`) → removes segmentation staircase/noise → fewer
+  high-curvature spikes that cause skew; but over-smoothing can round off **real
+  small morphology (blebs, daughter sacs)** — clinically important, so don't
+  overdo it.
+- **Fewer / `0`** → preserves fine detail, keeps noise.
+- **Interaction with `mesh`:** the `mesh` step already Taubin-smooths (30 iter).
+  When remeshing a surface that came straight from `mesh`, set `smooth 0` to avoid
+  double-smoothing; keep smoothing **on** for raw external STLs loaded via
+  `load-mesh`.
+
+**How to check your choice:** run `check` after `remesh` (uniform triangles, no
+slivers, good aspect ratio), and confirm the downstream OpenFOAM `checkMesh`
+skewness in vortex-cfd. Adjust `edge`/`smooth` and re-run `remesh` (it operates on
+the current surface, so re-run `mesh`/`load-mesh` first if you want a clean start).
 
 #### How `clip-sac` works
 
@@ -189,10 +227,13 @@ export aneurysm.stl
 | `params` | View and edit pipeline parameters (HU thresholds, `roi_radius`, `use_levelset`, `split_patches`, etc.). |
 | `segment` | Segment the DICOM volume using thresholds and the selected seed. |
 | `mesh` | Generate the 3D surface mesh from the segmentation. |
+| `remesh` | Taubin-smooth + uniformly remesh the surface (vmtkSurfaceRemeshing) for CFD-grade triangle quality. Run on the lumen surface **before `centerlines`/`extend`**. Tunable via `remesh_edge_length` / `remesh_smooth_iterations` in `params` — see "Tuning the `remesh` parameters" above. |
 | `centerlines` | Compute vessel centerlines. |
 | `extend` | Add flow extensions and cap the model. Must run before `clip-sac`. |
 | `metrics` | Calculate morphological metrics for the aneurysm. Works with any seed source. |
 | `clip-sac [--ratio N]` | Split the wall into dome + parent vessel via the centerline bulge field. Writes `sac_bulge_heatmap.ply` and prints field stats; tune the split with `--ratio`. Run after `extend`. |
+| `view [bulge]` | In-terminal rotatable preview of the clip-sac result; press `c` to overlay cap numbers (for `cap_label`). |
+| `cap_label` | Label each cap as inlet/outlet (`i`/`o`) so export writes `inlet.stl` / `outlet_N.stl`. Run after `extend`. |
 | `check` | Check mesh quality: manifold edges, open boundary loops, triangle quality, normal consistency. |
 | `check --deep` | Same as `check`, plus self-intersection detection (slow). |
 | `export <file>` | Save the final STL (and split patches if `split_patches = True`). Defaults to `output.stl`. |

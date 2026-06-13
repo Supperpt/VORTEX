@@ -33,6 +33,7 @@ def export_stl(
     sac_surface=None,
     parent_surface=None,
     neck_plane=None,
+    cap_labels=None,
 ) -> str:
     """Write *surface* to an STL file at *path*.
 
@@ -63,10 +64,71 @@ def export_stl(
         _export_cfd(surface, path, params, _progress,
                     sac_surface=sac_surface,
                     parent_surface=parent_surface,
-                    neck_plane=neck_plane)
+                    neck_plane=neck_plane,
+                    cap_labels=cap_labels)
 
     log.info("Exported STL: %s", path)
     return path
+
+
+# ---------------------------------------------------------------------------
+# Cap extraction (shared by export, the terminal viewer, and cap_label)
+# ---------------------------------------------------------------------------
+
+def _extract_patch(surface: "vtk.vtkPolyData", uid: int) -> "vtk.vtkPolyData":
+    """Return the sub-surface of *surface* whose CellEntityIds == uid."""
+    threshold = vtk.vtkThreshold()
+    threshold.SetInputData(surface)
+    threshold.SetInputArrayToProcess(
+        0, 0, 0, vtk.vtkDataObject.FIELD_ASSOCIATION_CELLS, "CellEntityIds"
+    )
+    threshold.SetLowerThreshold(uid)
+    threshold.SetUpperThreshold(uid)
+    threshold.Update()
+
+    geom = vtk.vtkGeometryFilter()
+    geom.SetInputData(threshold.GetOutput())
+    geom.Update()
+    return geom.GetOutput()
+
+
+def _patch_area(poly: "vtk.vtkPolyData") -> float:
+    """Total triangle area of a patch (mm²). 0.0 if empty."""
+    if poly.GetNumberOfCells() == 0:
+        return 0.0
+    tri = vtk.vtkTriangleFilter()
+    tri.SetInputData(poly)
+    tri.Update()
+    mp = vtk.vtkMassProperties()
+    mp.SetInputData(tri.GetOutput())
+    return float(mp.GetSurfaceArea())
+
+
+def iter_caps(surface: "vtk.vtkPolyData"):
+    """Yield (uid, patch_poly, centroid, area) for each cap of *surface*.
+
+    Caps are cells with CellEntityIds >= 2 (uid == 1 is the lumen wall and is
+    skipped; uid < 2 too). *surface* must carry the 'CellEntityIds' cell array
+    written by the capping step (i.e. session.final_surface). Yields nothing if
+    the array is absent. Centroid is the mean of the patch points (mm).
+    """
+    entity_ids = surface.GetCellData().GetArray("CellEntityIds")
+    if entity_ids is None:
+        return
+    ids_array = vtk_np.vtk_to_numpy(entity_ids)
+    for uid in np.unique(ids_array):
+        uid = int(uid)
+        if uid < 2:
+            continue  # lumen wall / background — not a cap
+        patch_poly = _extract_patch(surface, uid)
+        if patch_poly.GetNumberOfCells() == 0:
+            continue
+        if patch_poly.GetNumberOfPoints():
+            pts = vtk_np.vtk_to_numpy(patch_poly.GetPoints().GetData())
+            centroid = pts.mean(axis=0)
+        else:
+            centroid = np.zeros(3)
+        yield uid, patch_poly, centroid, _patch_area(patch_poly)
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +136,8 @@ def export_stl(
 # ---------------------------------------------------------------------------
 
 def _export_cfd(surface: "vtk.vtkPolyData", path: str, params: PipelineParams,
-                progress_cb, sac_surface=None, parent_surface=None, neck_plane=None) -> None:
+                progress_cb, sac_surface=None, parent_surface=None, neck_plane=None,
+                cap_labels=None) -> None:
     """Write a clean single-surface STL suitable for OpenFOAM snappyHexMesh.
 
     If 'CellEntityIds' cell data is present (from capping) and params.split_patches
@@ -82,69 +145,60 @@ def _export_cfd(surface: "vtk.vtkPolyData", path: str, params: PipelineParams,
     assignment in CFD solvers.
 
     When *sac_surface* is provided (i.e., clip-sac was run), the wall patch
-    (EntityId == 1) is replaced by two files:
-      {base}_aneurysm_dome.stl   — the aneurysm dome
-      {base}_parent_vessel.stl   — the remainder of the wall
-    and an optional {base}_neck_plane.json if *neck_plane* is set.
-    Without a sac_surface the classic {base}_wall.stl is written unchanged.
+    (EntityId == 1) is replaced by two files. Files are written with the bare
+    names vortex-cfd's default naming scheme expects, directly in the output
+    directory (no basename prefix):
+      aneurysm.stl    — the aneurysm dome           (sac_surface)
+      wall.stl        — the parent vessel / lumen wall
+      neck_plane.json — neck plane (when *neck_plane* is set)
+      <label>.stl     — each cap, named from *cap_labels* (inlet.stl /
+                        outlet_1.stl / ...); caps with no entry fall back to
+                        cap_<uid>.stl so vortex-cfd can prompt for them.
     """
+    cap_labels = cap_labels or {}
     progress_cb(10, "Preparing surface...")
     ready = _clean_and_orient(surface)
 
-    cell_data = ready.GetCellData()
-    entity_ids = cell_data.GetArray("CellEntityIds")
+    entity_ids = ready.GetCellData().GetArray("CellEntityIds")
 
     if entity_ids is not None and params.split_patches:
         progress_cb(30, "Found patch labels (CellEntityIds). Splitting into separate STLs...")
 
-        from vortex.utils.vtk_compat import vtk_np
-        ids_array = vtk_np.vtk_to_numpy(entity_ids)
-        unique_ids = np.unique(ids_array)
+        out_dir = os.path.dirname(path) or "."
+        ext = os.path.splitext(path)[1] or ".stl"
 
-        base, ext = os.path.splitext(path)
+        # --- Wall (EntityId == 1): dome + parent vessel when clip-sac was run,
+        #     otherwise a single wall.stl.
+        if sac_surface is not None:
+            dome_path = os.path.join(out_dir, f"aneurysm{ext}")
+            _write_stl(sac_surface, dome_path)
+            log.info("Exported aneurysm dome: %d triangles → %s",
+                     sac_surface.GetNumberOfCells(), dome_path)
+            if parent_surface is not None:
+                parent_path = os.path.join(out_dir, f"wall{ext}")
+                _write_stl(parent_surface, parent_path)
+                log.info("Exported parent vessel: %d triangles → %s",
+                         parent_surface.GetNumberOfCells(), parent_path)
+            if neck_plane is not None:
+                json_path = os.path.join(out_dir, "neck_plane.json")
+                with open(json_path, "w") as fh:
+                    json.dump(neck_plane, fh, indent=2)
+                log.info("Exported neck plane → %s", json_path)
+        else:
+            wall_poly = _extract_patch(ready, 1)
+            if wall_poly.GetNumberOfCells():
+                wall_path = os.path.join(out_dir, f"wall{ext}")
+                _write_stl(wall_poly, wall_path)
+                log.info("Exported wall: %d triangles → %s",
+                         wall_poly.GetNumberOfCells(), wall_path)
 
-        for i, uid in enumerate(unique_ids):
-            progress_cb(40 + int(i * 40 / len(unique_ids)), f"Extracting patch {uid}...")
-
-            threshold = vtk.vtkThreshold()
-            threshold.SetInputData(ready)
-            threshold.SetInputArrayToProcess(
-                0, 0, 0, vtk.vtkDataObject.FIELD_ASSOCIATION_CELLS, "CellEntityIds"
-            )
-            threshold.SetLowerThreshold(uid)
-            threshold.SetUpperThreshold(uid)
-            threshold.Update()
-
-            geom = vtk.vtkGeometryFilter()
-            geom.SetInputData(threshold.GetOutput())
-            geom.Update()
-
-            patch_poly = geom.GetOutput()
-            if patch_poly.GetNumberOfCells() == 0:
-                continue
-
-            if uid == 1 and sac_surface is not None:
-                # Replace wall patch with aneurysm dome + parent vessel
-                dome_path   = f"{base}_aneurysm_dome{ext}"
-                parent_path = f"{base}_parent_vessel{ext}"
-                _write_stl(sac_surface, dome_path)
-                log.info("Exported aneurysm_dome: %d triangles → %s",
-                         sac_surface.GetNumberOfCells(), dome_path)
-                if parent_surface is not None:
-                    _write_stl(parent_surface, parent_path)
-                    log.info("Exported parent_vessel: %d triangles → %s",
-                             parent_surface.GetNumberOfCells(), parent_path)
-                if neck_plane is not None:
-                    json_path = f"{base}_neck_plane.json"
-                    with open(json_path, "w") as fh:
-                        json.dump(neck_plane, fh, indent=2)
-                    log.info("Exported neck_plane → %s", json_path)
-            else:
-                suffix = "wall" if uid == 1 else f"cap_{uid}"
-                patch_path = f"{base}_{suffix}{ext}"
-                _write_stl(patch_poly, patch_path)
-                log.info("Exported patch %s: %d triangles → %s",
-                         suffix, patch_poly.GetNumberOfCells(), patch_path)
+        # --- Caps (EntityId >= 2): inlet/outlet from cap_labels, else cap_<uid>.
+        for uid, patch_poly, _centroid, _area in iter_caps(ready):
+            label = cap_labels.get(uid, f"cap_{uid}")
+            cap_path = os.path.join(out_dir, f"{label}{ext}")
+            _write_stl(patch_poly, cap_path)
+            log.info("Exported cap %d as '%s': %d triangles → %s",
+                     uid, label, patch_poly.GetNumberOfCells(), cap_path)
 
         progress_cb(100, "Patched export complete.")
 

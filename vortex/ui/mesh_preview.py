@@ -74,7 +74,7 @@ def _fit(points: np.ndarray):
 
 
 class PreviewData:
-    def __init__(self, dome, parent, ring, bulge_pts, bulge_vals, ratio):
+    def __init__(self, dome, parent, ring, bulge_pts, bulge_vals, ratio, caps=None):
         self.dome = dome
         self.parent = parent
         self.ring = ring
@@ -82,6 +82,9 @@ class PreviewData:
         self.bulge_vals = bulge_vals
         self.ratio = ratio
         self.has_bulge = bulge_vals is not None and len(bulge_pts) > 0
+        # caps: list of (uid:int, points:ndarray(N,3), centroid:ndarray(3,))
+        self.caps = caps or []
+        self.has_caps = len(self.caps) > 0
 
         union = [p for p in (dome, parent, ring) if len(p)]
         self.dome_centroid, self.dome_radius = _fit(
@@ -111,7 +114,19 @@ def build_preview(session) -> "PreviewData | None":
             bulge_vals = vtk_np.vtk_to_numpy(arr).astype(float)
 
     ratio = float(getattr(session.params, "sac_bulge_ratio", 1.4))
-    return PreviewData(dome, parent, ring, bulge_pts, bulge_vals, ratio)
+
+    # Caps (inlet/outlet openings) from the capped surface, for the 'c' overlay.
+    caps = []
+    final = getattr(session, "final_surface", None)
+    if final is not None:
+        try:
+            from vortex.pipeline.exporter import iter_caps
+            for uid, poly, centroid, _area in iter_caps(final):
+                caps.append((uid, _poly_points(poly), np.asarray(centroid, float)))
+        except Exception:
+            caps = []
+
+    return PreviewData(dome, parent, ring, bulge_pts, bulge_vals, ratio, caps=caps)
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +153,18 @@ def _project_to_dots(points, R, centroid, radius, zoom, cols, rows):
     dy = np.round(H / 2 - rot[:, 1] * scale).astype(int)   # flip y so up is up
     mask = (dx >= 0) & (dx < W) & (dy >= 0) & (dy < H)
     return dx, dy, mask
+
+
+def _project_cell(point, R, centroid, radius, zoom, cols, rows):
+    """Project one 3-D point to a character cell (col, row), or None if off-screen."""
+    W, H = cols * 2, rows * 4
+    rot = (np.asarray(point, float) - centroid) @ R.T
+    scale = zoom * 0.5 * min(W, H) / radius
+    dx = int(round(W / 2 + rot[0] * scale))
+    dy = int(round(H / 2 - rot[1] * scale))
+    if 0 <= dx < W and 0 <= dy < H:
+        return dx // 2, dy // 4
+    return None
 
 
 def _layers_for(data: PreviewData, mode: str):
@@ -169,8 +196,13 @@ def _layers_for(data: PreviewData, mode: str):
 
 
 def render_frame(data: PreviewData, mode: str, az: float, el: float,
-                 zoom: float, cols: int, rows: int) -> Text:
-    """Rasterize the chosen view into a braille (or ASCII) rich.Text of cols×rows."""
+                 zoom: float, cols: int, rows: int, show_caps: bool = False) -> Text:
+    """Rasterize the chosen view into a braille (or ASCII) rich.Text of cols×rows.
+
+    When *show_caps* is set, cap openings are drawn as dots and each cap's
+    CellEntityId is stamped as a digit at its projected centroid — so the user
+    can read off which number is which before running 'cap_label'.
+    """
     cols = max(10, cols)
     rows = max(5, rows)
     R = _rotation(az, el)
@@ -189,16 +221,45 @@ def render_frame(data: PreviewData, mode: str, az: float, el: float,
                 prio[r, c] = pr[k]
                 style_idx[r, c] = idx[k]
 
-    out = Text()
+    # Build the character/style grid from the rasterized dots.
+    chars = [[" "] * cols for _ in range(rows)]
+    cell_styles = [[None] * cols for _ in range(rows)]
     for r in range(rows):
         for c in range(cols):
             b = int(bits[r, c])
             if b == 0:
+                continue
+            chars[r][c] = chr(0x2800 + b) if USE_UNICODE else _ASCII_RAMP[bin(b).count("1")]
+            cell_styles[r][c] = style_table[style_idx[r, c]]
+
+    # Overlay caps: faint dots for each opening, then a numeric label at its centre.
+    if show_caps and data.has_caps:
+        for uid, pts, _cen in data.caps:
+            dx, dy, mask = _project_to_dots(pts, R, centroid, radius, zoom, cols, rows)
+            for k in np.nonzero(mask)[0]:
+                c, r = dx[k] // 2, dy[k] // 4
+                if chars[r][c] == " ":
+                    chars[r][c] = chr(0x2800 + int(_BIT[dx[k] % 2, dy[k] % 4])) if USE_UNICODE else "·"
+                    cell_styles[r][c] = "vortex.warn"
+        for uid, _pts, cen in data.caps:
+            cell = _project_cell(cen, R, centroid, radius, zoom, cols, rows)
+            if cell is None:
+                continue
+            c0, r0 = cell
+            for j, ch in enumerate(str(uid)):
+                c = c0 + j
+                if 0 <= c < cols and 0 <= r0 < rows:
+                    chars[r0][c] = ch
+                    cell_styles[r0][c] = "vortex.bright"
+
+    out = Text()
+    for r in range(rows):
+        for c in range(cols):
+            ch = chars[r][c]
+            if ch == " ":
                 out.append(" ")
-            elif USE_UNICODE:
-                out.append(chr(0x2800 + b), style=style_table[style_idx[r, c]])
             else:
-                out.append(_ASCII_RAMP[bin(b).count("1")], style=style_table[style_idx[r, c]])
+                out.append(ch, style=cell_styles[r][c])
         if r < rows - 1:
             out.append("\n")
     return out
@@ -213,8 +274,12 @@ def _footer(state, data: PreviewData) -> Text:
     f.append(f"az {state['az']:.0f}° el {state['el']:.0f}° · ×{state['zoom']:.2f} · ",
              style="vortex.dim")
     f.append(f"{state['mode']}", style="vortex.accent")
-    f.append(f" · ratio {data.ratio:.2f}\n", style="vortex.dim")
-    f.append("←→/hl rotate · ↑↓/jk tilt · +/- zoom · t dome⇄bulge · r reset · q quit",
+    f.append(f" · ratio {data.ratio:.2f}", style="vortex.dim")
+    if state.get("show_caps") and data.has_caps:
+        f.append(f" · caps {sorted(uid for uid, _p, _c in data.caps)}", style="vortex.warn")
+    f.append("\n", style="vortex.dim")
+    caps_hint = " · c caps" if data.has_caps else ""
+    f.append(f"←→/hl rotate · ↑↓/jk tilt · +/- zoom · t dome⇄bulge{caps_hint} · r reset · q quit",
              style="vortex.dim")
     return f
 
@@ -255,14 +320,14 @@ def _run_interactive(data: PreviewData, mode: str) -> None:
     from prompt_toolkit.layout.containers import Window
     from prompt_toolkit.layout.controls import FormattedTextControl
 
-    state = {"az": 30.0, "el": 20.0, "zoom": 1.0, "mode": mode}
+    state = {"az": 30.0, "el": 20.0, "zoom": 1.0, "mode": mode, "show_caps": False}
 
     def get_text():
         size = get_app().output.get_size()
         cols = max(20, size.columns)
         rows = max(8, size.rows - 2)        # reserve two lines for the footer
         frame = render_frame(data, state["mode"], state["az"], state["el"],
-                             state["zoom"], cols, rows)
+                             state["zoom"], cols, rows, show_caps=state["show_caps"])
         body = frame + Text("\n") + _footer(state, data)
         return ANSI(_to_ansi(body, cols))
 
@@ -299,6 +364,11 @@ def _run_interactive(data: PreviewData, mode: str) -> None:
     def _(event):
         if data.has_bulge:
             state["mode"] = "bulge" if state["mode"] == "dome" else "dome"
+
+    @kb.add("c")
+    def _(event):
+        if data.has_caps:
+            state["show_caps"] = not state["show_caps"]
 
     @kb.add("r")
     def _(event):

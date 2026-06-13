@@ -127,6 +127,18 @@ Added a command to apply VMTK operations to existing STL files:
 - Computes centerlines and adds extensions/capping.
 - Useful for meshes generated in other tools (e.g., 3D Slicer, Horos).
 
+### Surface Remeshing (`remesh`) for CFD-grade triangle quality
+New shell command `remesh` (`vortex/pipeline/meshing.py:remesh_surface`):
+- **Why:** A vortex-cfd run (patient AA_011) tripped OpenFOAM's checkMesh skewness gate. Root cause is surface quality — irregular/non-uniform STL triangulation in high-curvature regions forces snappyHexMesh into skewed boundary-layer cells. VORTEX already Taubin-smooths in `mesh`, but had **no uniform isotropic remeshing**, the standard vmtk CFD-prep step.
+- **What:** optional Taubin smoothing pass (reuses `_taubin_smooth`) + `vmtkSurfaceRemeshing` (`ElementSizeMode="edgelength"`, `TargetEdgeLength=params.remesh_edge_length`, `PreserveBoundaryEdges=1` to keep openings clean for flow extensions) + largest-region + normals.
+- **Where:** operates on `session.surface` (the open lumen) and **must run before `centerlines`/`extend`** — it does not touch cap `CellEntityIds` (none exist yet) and preserves the open boundary loops. The `remesh` handler resets `session.centerlines`/`profiles` (geometry changed) like `load-mesh` does. Works on a `load-mesh`-loaded STL too, so already-segmented geometries can be improved.
+- **Params:** `remesh_edge_length` (mm, default 0.25, 0=skip) and `remesh_smooth_iterations` (default 20, 0=skip) in `PipelineParams`; editable via the `params` command (keys `edge` / `smooth`).
+- **Tuning (documented in README "Tuning the `remesh` parameters"):**
+  - `edge` ↓ = finer/more triangles, better curvature capture, heavier CFD mesh; ↑ = fewer/faster but if it exceeds the local curvature scale it re-introduces skew. Keep it ≤ the CFD near-wall cell size (~0.125 mm in vortex-cfd); ICA vessels ~0.2–0.3 mm, small domes 0.15–0.2 mm. Uniformity (not small size) is what fixes skew.
+  - `smooth` ↑ = removes segmentation noise/spikes but can round off real blebs/daughter sacs; ↓/0 preserves detail. Taubin is volume-preserving (no sac shrinkage). `mesh` already smooths 30 iter → set `smooth 0` when remeshing a freshly-meshed surface; keep it on for raw `load-mesh` STLs.
+  - Verify with `check` after remesh + the downstream OpenFOAM `checkMesh` skewness.
+- **Verified:** vmtkSurfaceRemeshing available in the vortex-aneurysm env; smoke test on a real STL reduced triangle-area CV (0.57 → 0.28).
+
 ### Automated Morphological Metrics
 Implemented a `metrics` command in the interactive shell:
 - Relies on the `seed_point_ijk` to locate the aneurysm dome.
@@ -137,8 +149,9 @@ Implemented a `metrics` command in the interactive shell:
 Configured `vmtkCapper` to output `CellEntityIds`:
 - Wall is typically tagged as `1`.
 - Caps (inlets/outlets) are tagged `2`, `3`, etc.
-- The `export` function now has a `--split-patches` flag (or `split_patches=True` in params).
-- When enabled, it uses `vtkThreshold` to separate these IDs and write them to individual STLs (`wall.stl`, `cap_2.stl`, etc.). Note that VMTK assigns these purely geometrically; semantic labeling (Inlet vs. Outlet) must be done manually by the user in their CFD pre-processor.
+- The `export` function has a `--split-patches` flag (or `split_patches=True` in params).
+- When enabled, it uses `vtkThreshold` (shared helper `exporter.iter_caps`) to separate these IDs and write them to individual STLs. **Output uses bare names matching vortex-cfd's default scheme** (no basename prefix), written into the export directory: `aneurysm.stl` (dome), `wall.stl` (parent vessel), `neck_plane.json`, and one STL per cap.
+- **Cap inlet/outlet labelling** is no longer left to the CFD pre-processor: the `cap_label` command (with the `view` viewer's `c` toggle to overlay cap numbers) records `session.cap_labels = {CellEntityId: 'inlet'|'outlet_N'}`. `export` then writes caps as `inlet.stl` / `outlet_1.stl` / … Unlabelled caps fall back to `cap_<uid>.stl`. VMTK still assigns the geometric IDs; `cap_label` adds the semantics once, interactively, so downstream vortex-cfd batch runs are unattended.
 
 ### 14. Mesh Quality Checks (`check` / `check-mesh`)
 - **Feature**: Added `vortex/pipeline/mesh_quality.py` with `check_mesh_quality(mesh, deep=False) → dict`.

@@ -25,7 +25,7 @@ from vortex.utils.logging_config import setup_logging, get_logger
 from vortex.state.app_state import PipelineParams
 from vortex.pipeline.dicom_loader import list_series, load_series
 from vortex.pipeline.segmentation import segment
-from vortex.pipeline.meshing import generate_mesh
+from vortex.pipeline.meshing import generate_mesh, remesh_surface
 from vortex.pipeline.centerlines import compute_centerlines
 from vortex.pipeline.flow_extensions import add_flow_extensions
 from vortex.pipeline.exporter import export_stl
@@ -54,6 +54,7 @@ class Session:
         self.parent_vessel: Any = None     # parent vessel wall (from clip-sac)
         self.bulge_surface: Any = None     # wall with BulgeRatio scalar (for 'view')
         self.neck_plane: dict = None       # {'origin': [...], 'normal': [...]}
+        self.cap_labels: dict = {}         # {CellEntityId(int): 'inlet'|'outlet_N'} from cap_label
         self.seed_mm: Optional[tuple] = None  # (x,y,z) mm — set by set-seed or DICOM seed
         self.clip_sac_view: Optional[dict] = None  # cached clip-sac context for the dashboard panel
         self.params: PipelineParams = PipelineParams()
@@ -578,10 +579,12 @@ def do_shell():
                     "  [cyan]status[/cyan]                  Show pipeline dashboard\n"
                     "  [cyan]segment[/cyan]                 Run segmentation\n"
                     "  [cyan]mesh[/cyan]                    Generate mesh\n"
+                    "  [cyan]remesh[/cyan]                  Smooth + uniformly remesh the surface for CFD quality (before centerlines)\n"
                     "  [cyan]centerlines[/cyan]             Compute centerlines\n"
                     "  [cyan]extend[/cyan]                  Add flow extensions & cap\n"
                     "  [cyan]clip-sac [--ratio N][/cyan]   Split wall into dome + parent via centerline bulge field (writes heatmap)\n"
                     "  [cyan]view [bulge][/cyan]            Inspect clip-sac in the terminal: rotatable braille preview of dome+cut (or bulge heatmap)\n"
+                    "  [cyan]cap_label[/cyan]               Label each cap inlet/outlet for CFD export (toggle 'c' in view to see cap numbers)\n"
                     "  [cyan]check[/cyan]                        Check mesh quality (manifold, holes, triangle quality)\n"
                     "  [cyan]check --deep[/cyan]                 Also run self-intersection detection (slow)\n"
                     "  [cyan]check --export-bad bad.stl[/cyan]   Export bad triangles (AR>20) to STL\n"
@@ -692,6 +695,30 @@ def do_shell():
                     session.surface = run_pipeline_step("Meshing", generate_mesh, session.vtk_image, session.params)
                     session.final_surface = session.surface
 
+            elif cmd == "remesh":
+                if session.surface is None:
+                    console.print(
+                        "[red]No surface to remesh.[/red] Run [vortex.accent]mesh[/vortex.accent] "
+                        "or [vortex.accent]load-mesh[/vortex.accent] first."
+                    )
+                else:
+                    n_before = session.surface.GetNumberOfCells()
+                    remeshed = run_pipeline_step("Remeshing", remesh_surface,
+                                                 session.surface, session.params)
+                    if remeshed is not None:
+                        session.surface = remeshed
+                        session.final_surface = remeshed
+                        # Surface geometry changed — downstream results are stale.
+                        session.centerlines = None
+                        session.profiles = None
+                        console.print(
+                            f"[green]Remeshed:[/green] {n_before:,} → "
+                            f"{remeshed.GetNumberOfCells():,} triangles "
+                            f"(edge {session.params.remesh_edge_length} mm, "
+                            f"smooth {session.params.remesh_smooth_iterations} iter)\n"
+                            "[dim]Re-run 'centerlines' → 'extend' → 'clip-sac' → 'cap_label' → 'export'.[/dim]"
+                        )
+
             elif cmd == "check":
                 target = session.final_surface or session.surface
                 if target is None:
@@ -779,6 +806,8 @@ def do_shell():
                     
                     session.params.flow_ext_selected = ids
                     session.final_surface = run_pipeline_step("Flow Extensions", add_flow_extensions, session.surface, session.centerlines, session.params)
+                    # Cap IDs change with a new capping — drop any stale labels.
+                    session.cap_labels = {}
 
             elif cmd == "clip-sac":
                 if session.surface is None:
@@ -913,6 +942,57 @@ def do_shell():
                     from vortex.ui.mesh_preview import run_viewer
                     run_viewer(console, session, mode=mode)
 
+            elif cmd in ("cap_label", "cap-label"):
+                if session.final_surface is None:
+                    console.print(
+                        "[red]No capped surface yet.[/red] Run [vortex.accent]extend[/vortex.accent] "
+                        "(flow extensions & capping) first, then [vortex.accent]cap_label[/vortex.accent]."
+                    )
+                else:
+                    from vortex.pipeline.exporter import iter_caps
+                    caps = list(iter_caps(session.final_surface))
+                    if not caps:
+                        console.print(
+                            "[red]No caps found on the surface[/red] "
+                            "(no CellEntityIds >= 2). Did capping run?"
+                        )
+                    else:
+                        console.print(
+                            f"[vortex.dim]Found {len(caps)} cap(s). Tip: run "
+                            "[vortex.accent]view[/vortex.accent] and press "
+                            "[vortex.accent]c[/vortex.accent] to see cap numbers on the model.[/vortex.dim]"
+                        )
+                        cap_labels: dict = {}
+                        outlet_n = 0
+                        for uid, _poly, centroid, area in caps:
+                            console.print(
+                                f"  [cyan]cap {uid}[/cyan]  "
+                                f"centre ({centroid[0]:.1f}, {centroid[1]:.1f}, {centroid[2]:.1f})  "
+                                f"area {area:.1f} mm²"
+                            )
+                            choice = Prompt.ask(
+                                f"  Is cap {uid} an [bold]i[/bold]nlet or [bold]o[/bold]utlet?",
+                                choices=["i", "o"], default="o",
+                            )
+                            if choice == "i":
+                                cap_labels[uid] = "inlet"
+                            else:
+                                outlet_n += 1
+                                cap_labels[uid] = f"outlet_{outlet_n}"
+
+                        inlets = [u for u, l in cap_labels.items() if l == "inlet"]
+                        outlets = [u for u, l in cap_labels.items() if l.startswith("outlet")]
+                        if len(inlets) != 1 or not outlets:
+                            console.print(
+                                f"[red]Invalid labelling:[/red] need exactly 1 inlet and ≥1 outlet "
+                                f"(got {len(inlets)} inlet(s), {len(outlets)} outlet(s)). "
+                                "Caps left unlabelled — run [vortex.accent]cap_label[/vortex.accent] again."
+                            )
+                        else:
+                            session.cap_labels = cap_labels
+                            summary = "  ".join(f"cap {u}→{l}" for u, l in cap_labels.items())
+                            console.print(f"[green]Caps labelled:[/green] {summary}")
+
             elif cmd == "metrics":
                 if session.surface is None:
                     console.print("[red]Run 'mesh' first to generate a surface.[/red]")
@@ -951,7 +1031,8 @@ def do_shell():
                                       session.final_surface, path, session.params,
                                       sac_surface=session.sac_surface,
                                       parent_surface=session.parent_vessel,
-                                      neck_plane=session.neck_plane)
+                                      neck_plane=session.neck_plane,
+                                      cap_labels=session.cap_labels)
                     if session.bulge_surface is not None and out_path:
                         from vortex.pipeline.sac_clipping import export_bulge_heatmap
                         export_dir = os.path.dirname(os.path.abspath(out_path))
@@ -1008,13 +1089,15 @@ def do_shell():
                 table.add_row("levelset_curvature", str(p.levelset_curvature))
                 table.add_row("levelset_propagation", str(p.levelset_propagation))
                 table.add_row("flow_ext_ratio", str(p.flow_ext_ratio))
+                table.add_row("remesh_edge_length", str(p.remesh_edge_length))
+                table.add_row("remesh_smooth_iterations", str(p.remesh_smooth_iterations))
                 table.add_row("output_mode", "fsi" if p.build_wall else "solid" if p.solid else "cfd")
                 table.add_row("split_patches", str(p.split_patches))
                 table.add_row("sac_bulge_ratio", str(p.sac_bulge_ratio))
 
                 console.print(table)
                 if Confirm.ask("Edit a parameter?"):
-                    key = Prompt.ask("Parameter name", choices=["lower", "upper", "resample", "roi", "levelset", "ls_iter", "ls_curv", "ls_prop", "ratio", "split", "sac_ratio"])
+                    key = Prompt.ask("Parameter name", choices=["lower", "upper", "resample", "roi", "levelset", "ls_iter", "ls_curv", "ls_prop", "ratio", "edge", "smooth", "split", "sac_ratio"])
                     val = Prompt.ask("New value")
                     if key == "lower": p.lower_threshold = float(val)
                     if key == "upper": p.upper_threshold = float(val)
@@ -1025,6 +1108,8 @@ def do_shell():
                     if key == "ls_curv": p.levelset_curvature = float(val)
                     if key == "ls_prop": p.levelset_propagation = float(val)
                     if key == "ratio": p.flow_ext_ratio = float(val)
+                    if key == "edge": p.remesh_edge_length = float(val)
+                    if key == "smooth": p.remesh_smooth_iterations = int(val)
                     if key == "split": p.split_patches = (val.lower() == "true")
                     if key == "sac_ratio": p.sac_bulge_ratio = float(val)
 

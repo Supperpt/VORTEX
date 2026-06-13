@@ -123,6 +123,74 @@ def generate_mesh(
     return surface
 
 
+def remesh_surface(
+    surface: "vtk.vtkPolyData",
+    params: PipelineParams,
+    progress_cb: Optional[Callable[[int, str], None]] = None,
+) -> "vtk.vtkPolyData":
+    """Improve surface triangle quality for CFD: Taubin smoothing + uniform remeshing.
+
+    Produces near-equilateral, evenly-sized triangles via vmtkSurfaceRemeshing,
+    which removes the irregular/skewed triangulation that forces snappyHexMesh
+    into skewed boundary-layer cells downstream.  Operates on the open lumen
+    surface and MUST be run before capping/flow extensions — it does not touch
+    cap CellEntityIds (there are none yet) and preserves the open boundary loops
+    so vmtkFlowExtensions still works.
+
+    Controlled by params.remesh_edge_length (mm, 0 = skip remeshing) and
+    params.remesh_smooth_iterations (0 = skip smoothing).
+
+    Returns the remeshed vtkPolyData.
+    """
+    def _progress(pct: int, msg: str) -> None:
+        if progress_cb:
+            progress_cb(pct, msg)
+        log.debug("[%3d%%] %s", pct, msg)
+
+    n_before = surface.GetNumberOfCells()
+    _progress(0, f"Preparing surface ({n_before:,} triangles)...")
+
+    # 1. Taubin smoothing pass (volume-preserving noise removal).
+    if params.remesh_smooth_iterations > 0:
+        _progress(20, f"Smoothing surface (Taubin, {params.remesh_smooth_iterations} iter)...")
+        surface = _taubin_smooth(surface, iterations=params.remesh_smooth_iterations, pass_band=0.1)
+
+    # 2. Uniform isotropic remeshing via VMTK.
+    if params.remesh_edge_length > 0.0:
+        try:
+            from vmtk import vmtkscripts
+        except ImportError as exc:
+            raise ImportError(
+                "VMTK is required for surface remeshing. "
+                "Make sure vmtk is installed in the vortex-aneurysm env."
+            ) from exc
+
+        _progress(45, f"Remeshing to uniform {params.remesh_edge_length} mm edges...")
+        remesher = vmtkscripts.vmtkSurfaceRemeshing()
+        remesher.Surface = surface
+        remesher.ElementSizeMode = "edgelength"
+        remesher.TargetEdgeLength = params.remesh_edge_length
+        remesher.PreserveBoundaryEdges = 1   # keep vessel openings as clean loops for capping
+        remesher.Execute()
+        surface = remesher.Surface
+
+    # 3. Keep the largest region and recompute normals.
+    _progress(80, "Cleaning up...")
+    surface = _largest_region(surface)
+    normals = vtk.vtkPolyDataNormals()
+    normals.SetInputData(surface)
+    normals.ConsistencyOn()
+    normals.AutoOrientNormalsOn()
+    normals.Update()
+    surface = normals.GetOutput()
+
+    n_after = surface.GetNumberOfCells()
+    _progress(100, f"Remesh done: {n_before:,} → {n_after:,} triangles")
+    log.info("Remesh: %d → %d triangles (edge=%.3f mm, smooth=%d iter)",
+             n_before, n_after, params.remesh_edge_length, params.remesh_smooth_iterations)
+    return surface
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
