@@ -708,15 +708,22 @@ def do_shell():
                     if remeshed is not None:
                         session.surface = remeshed
                         session.final_surface = remeshed
-                        # Surface geometry changed — downstream results are stale.
-                        session.centerlines = None
-                        session.profiles = None
+                        # Remeshing is volume-preserving (Taubin) and keeps the open
+                        # boundary loops (PreserveBoundaryEdges=1), so centerlines
+                        # computed beforehand stay valid — keep them. This makes the
+                        # fast 'centerlines → remesh → extend' order possible (centerlines
+                        # run on the coarse surface, not the dense remeshed one). Centerlines
+                        # computed AFTER remesh on the fine surface are very slow.
+                        had_centerlines = session.centerlines is not None
+                        next_step = "'extend'" if had_centerlines else "'centerlines' → 'extend'"
                         console.print(
                             f"[green]Remeshed:[/green] {n_before:,} → "
                             f"{remeshed.GetNumberOfCells():,} triangles "
                             f"(edge {session.params.remesh_edge_length} mm, "
                             f"smooth {session.params.remesh_smooth_iterations} iter)\n"
-                            "[dim]Re-run 'centerlines' → 'extend' → 'clip-sac' → 'cap_label' → 'export'.[/dim]"
+                            + ("[dim]Kept existing centerlines (still valid after remesh).[/dim]\n"
+                               if had_centerlines else "")
+                            + f"[dim]Re-run {next_step} → 'clip-sac' → 'cap_label' → 'export'.[/dim]"
                         )
 
             elif cmd == "check":
