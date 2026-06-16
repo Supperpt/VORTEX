@@ -24,6 +24,7 @@ Entry points:
 
 import logging
 import numpy as np
+import scipy.sparse as sp
 
 from vortex.utils.vtk_compat import vtk, vtk_np
 
@@ -234,6 +235,12 @@ def _smooth_point_scalar(surface, array_name, iterations=5):
 
     Averages each point's value with its edge neighbours, a handful of times,
     so the clip iso-contour (the neck) is smooth rather than jagged.
+
+    Vectorised: the edge adjacency is built once as a sparse 0/1 matrix and each
+    iteration is a sparse matrix-vector product, so the cost is independent of the
+    Python interpreter (matters for dense surfaces, e.g. after 'remesh'). The
+    update rule is identical to the per-point version:
+        new[i] = 0.5 * v[i] + 0.5 * mean(unique edge-neighbours of i)
     """
     arr = surface.GetPointData().GetArray(array_name)
     if arr is None:
@@ -241,25 +248,40 @@ def _smooth_point_scalar(surface, array_name, iterations=5):
     values = vtk_np.vtk_to_numpy(arr).astype(np.float64).copy()
     n = surface.GetNumberOfPoints()
 
-    # Build neighbour lists from triangle cells.
-    neighbours = [set() for _ in range(n)]
-    id_list = vtk.vtkIdList()
-    for cid in range(surface.GetNumberOfCells()):
-        surface.GetCellPoints(cid, id_list)
-        ids = [id_list.GetId(i) for i in range(id_list.GetNumberOfIds())]
-        for a in ids:
-            for b in ids:
-                if a != b:
-                    neighbours[a].add(b)
+    # Vectorised triangle connectivity. vtkPolyData polys are stored flat as
+    # [npts, p0, p1, ..., npts, p0, ...]; for an all-triangle mesh that is a
+    # repeating stride of 4 with a leading 3.
+    polys = vtk_np.vtk_to_numpy(surface.GetPolys().GetData())
+    is_triangles = (polys.size > 0 and polys.size % 4 == 0
+                    and bool(np.all(polys.reshape(-1, 4)[:, 0] == 3)))
+    if not is_triangles:
+        # Safety net for non-triangle input: triangulate once, then re-extract.
+        tri = vtk.vtkTriangleFilter()
+        tri.SetInputData(surface)
+        tri.Update()
+        triangulated = tri.GetOutput()
+        polys = vtk_np.vtk_to_numpy(triangulated.GetPolys().GetData())
+        if polys.size == 0 or polys.size % 4 != 0:
+            return  # nothing usable to smooth over
 
-    nbr_arr = [np.fromiter(s, dtype=np.int64) for s in neighbours]
+    tris = polys.reshape(-1, 4)[:, 1:]   # (n_cells, 3)
+
+    # Symmetric 0/1 adjacency from the three triangle edges (both directions).
+    e0 = np.concatenate([tris[:, 0], tris[:, 1], tris[:, 2]])
+    e1 = np.concatenate([tris[:, 1], tris[:, 2], tris[:, 0]])
+    rows = np.concatenate([e0, e1])
+    cols = np.concatenate([e1, e0])
+    adj = sp.coo_matrix((np.ones(rows.size, dtype=np.float64), (rows, cols)),
+                        shape=(n, n)).tocsr()
+    adj.data[:] = 1.0           # collapse shared edges → unique-neighbour count
+    deg = np.asarray(adj.sum(axis=1)).ravel()
+    has_nb = deg > 0
 
     for _ in range(iterations):
+        nbr_mean = np.zeros_like(values)
+        nbr_mean[has_nb] = (adj @ values)[has_nb] / deg[has_nb]
         new = values.copy()
-        for i in range(n):
-            nb = nbr_arr[i]
-            if len(nb):
-                new[i] = 0.5 * values[i] + 0.5 * values[nb].mean()
+        new[has_nb] = 0.5 * values[has_nb] + 0.5 * nbr_mean[has_nb]
         values = new
 
     smoothed = vtk_np.numpy_to_vtk(values, deep=True)

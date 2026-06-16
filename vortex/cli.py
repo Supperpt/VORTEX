@@ -64,7 +64,8 @@ session = Session()
 # Commands whose output is transient scrollback (reports/tables). After these
 # run we pause before the dashboard redraw clears the screen, so the user can
 # actually read the result.
-REPORT_COMMANDS = {"check", "metrics", "params", "status", "list", "centerlines"}
+REPORT_COMMANDS = {"check", "metrics", "params", "status", "list", "centerlines",
+                   "sample-hu", "sample_hu"}
 
 # ---------------------------------------------------------------------------
 # CLI Helpers
@@ -310,6 +311,81 @@ def display_bad_triangles(worst, ar_threshold, export_path=None):
 
     if export_path:
         console.print(f"  [cyan]Bad triangles exported to:[/cyan] {export_path}")
+
+
+def display_hu_report(stats: dict):
+    """Render a sample_hu_sphere() stats dict: percentiles + threshold suggestions.
+
+    Shared by the shell 'sample-hu' command and the 'sample-hu' CLI subcommand.
+    """
+    table = Table(title=f"Lumen HU around seed (sphere r={stats['radius_mm']:.1f} mm)",
+                  box=box.ROUNDED, header_style="bold magenta")
+    table.add_column("Statistic", style="cyan")
+    table.add_column("HU", justify="right", style="bold")
+    table.add_row("Voxels sampled", f"{stats['count']:,}")
+    table.add_row("min",    f"{stats['min']:.0f}")
+    table.add_row("p5",     f"{stats['p5']:.0f}")
+    table.add_row("median", f"{stats['median']:.0f}")
+    table.add_row("mean",   f"{stats['mean']:.0f}")
+    table.add_row("p95",    f"{stats['p95']:.0f}")
+    table.add_row("p99",    f"{stats['p99']:.0f}")
+    table.add_row("max",    f"{stats['max']:.0f}")
+    console.print(table)
+
+    # Data-driven threshold suggestions (informational only).
+    sug_upper = round(stats['p99'] * 1.10)
+    sug_lower = round(stats['p5'])
+    low_warn = ("  [yellow](close to soft tissue — verify it excludes brain/CSF)[/yellow]"
+                if sug_lower < 100 else "")
+    console.print(
+        f"\n[bold]Suggested thresholds[/bold] [dim](informational — set via 'params' / --lower-threshold/--upper-threshold)[/dim]\n"
+        f"  upper ≈ [green]{sug_upper}[/green] HU  [dim](p99 + 10% margin)[/dim]\n"
+        f"  lower ≈ [green]{sug_lower}[/green] HU  [dim](~p5)[/dim]{low_warn}\n"
+        f"[dim]ACM note: if bone (~300–1900 HU) overlaps the lumen range, "
+        f"isolate it by space (tighter roi_radius / seed component), not by threshold.[/dim]"
+    )
+
+
+def do_sample_hu(args):
+    """CLI handler: sample-hu subcommand (non-interactive)."""
+    from vortex.pipeline.dicom_loader import ijk_to_mm, sample_hu_sphere
+
+    series = list_series(args.folder)
+    if not series:
+        console.print(f"[bold red]No DICOM series found in {args.folder}[/bold red]")
+        return 1
+    uid = args.series_uid or series[0]["series_uid"]
+    sitk_image = load_series(args.folder, uid)
+
+    # Resolve seed in mm: prefer explicit --seed-mm, else convert --seed-ijk.
+    seed_mm = None
+    if args.seed_mm:
+        try:
+            seed_mm = tuple(map(float, args.seed_mm.split(",")))
+        except ValueError:
+            console.print(f"[bold red]Invalid --seed-mm. Expected 'x,y,z', got '{args.seed_mm}'[/bold red]")
+            return 1
+    elif args.seed_ijk:
+        try:
+            seed_ijk = tuple(map(int, args.seed_ijk.split(",")))
+        except ValueError:
+            console.print(f"[bold red]Invalid --seed-ijk. Expected 'i,j,k', got '{args.seed_ijk}'[/bold red]")
+            return 1
+        seed_mm = ijk_to_mm(sitk_image, seed_ijk)
+    else:
+        console.print("[bold red]A seed is required: pass --seed-ijk i,j,k or --seed-mm x,y,z[/bold red]")
+        return 1
+
+    with console.status("[cyan]Sampling HU around seed...", spinner="dots"):
+        stats = sample_hu_sphere(sitk_image, seed_mm, args.radius)
+
+    if stats is None:
+        console.print("[bold red]No voxels sampled.[/bold red] The seed may be outside the "
+                      "volume or the radius too small.")
+        return 1
+
+    display_hu_report(stats)
+    return 0
 
 
 def do_check_mesh(args):
@@ -581,6 +657,7 @@ def do_shell():
                     "  [cyan]list[/cyan]                    List series in loaded folder\n"
                     "  [cyan]seed[/cyan]                    Open DICOM visual seed picker (requires DICOM)\n"
                     "  [cyan]set-seed X Y Z[/cyan]          Set seed coordinates (e.g. read from MeshLab/Meshmixer)\n"
+                    "  [cyan]sample-hu [radius][/cyan]      Sample lumen HU around the seed to pick lower/upper thresholds\n"
                     "  [cyan]status[/cyan]                  Show pipeline dashboard\n"
                     "  [cyan]reset [geometry|all][/cyan]   Clear computed mesh/results (geometry), or everything (all)\n"
                     "  [cyan]segment[/cyan]                 Run segmentation\n"
@@ -1041,6 +1118,44 @@ def do_shell():
                             summary = "  ".join(f"cap {u}→{l}" for u, l in cap_labels.items())
                             console.print(f"[green]Caps labelled:[/green] {summary}")
 
+            elif cmd in ("sample-hu", "sample_hu"):
+                if session.sitk_image is None:
+                    console.print(
+                        "[red]HU sampling needs a DICOM volume loaded.[/red] Run 'load <dir>' first."
+                    )
+                else:
+                    # Resolve a seed in mm — same pattern as clip-sac / metrics.
+                    seed_mm = session.seed_mm
+                    if seed_mm is None and session.params.seed_point_ijk and session.sitk_image:
+                        from vortex.pipeline.dicom_loader import ijk_to_mm
+                        seed_mm = ijk_to_mm(session.sitk_image, session.params.seed_point_ijk)
+                    if seed_mm is None:
+                        console.print(
+                            "[red]No seed point available.[/red]\n"
+                            "[dim]Options:\n"
+                            "  • 'set-seed X Y Z'   — type coordinates from MeshLab / Meshmixer\n"
+                            "  • 'seed'             — DICOM slice picker (requires DICOM loaded)[/dim]"
+                        )
+                    else:
+                        radius = 3.0
+                        if len(parts) > 1:
+                            try:
+                                radius = float(parts[1])
+                            except ValueError:
+                                console.print("[yellow]Radius must be a number (mm), using 3.0[/yellow]")
+
+                        from vortex.pipeline.dicom_loader import sample_hu_sphere
+                        with console.status("[cyan]Sampling HU around seed...", spinner="dots"):
+                            stats = sample_hu_sphere(session.sitk_image, seed_mm, radius)
+
+                        if stats is None:
+                            console.print(
+                                "[red]No voxels sampled.[/red] The seed may be outside the volume "
+                                "or the radius too small."
+                            )
+                        else:
+                            display_hu_report(stats)
+
             elif cmd == "metrics":
                 if session.surface is None:
                     console.print("[red]Run 'mesh' first to generate a surface.[/red]")
@@ -1203,6 +1318,16 @@ def create_parser() -> argparse.ArgumentParser:
     seed_p.add_argument("folder", help="Path to DICOM folder")
     seed_p.add_argument("--series-uid", help="Specific SeriesInstanceUID to load (default: largest)")
 
+    # Command: sample-hu
+    hu_p = subparsers.add_parser("sample-hu",
+                                 help="Sample lumen HU around a seed to pick lower/upper thresholds")
+    hu_p.add_argument("folder", help="Path to DICOM folder")
+    hu_p.add_argument("--series-uid", help="Specific SeriesInstanceUID to load (default: largest)")
+    hu_p.add_argument("--seed-ijk", help="Seed point as image index 'i,j,k' (e.g. from seed-picker)")
+    hu_p.add_argument("--seed-mm", help="Seed point as world coordinates 'x,y,z' in mm")
+    hu_p.add_argument("--radius", type=float, default=3.0,
+                      help="Sphere radius in mm (default: 3.0)")
+
     # Command: check-mesh
     chk_p = subparsers.add_parser("check-mesh", help="Report mesh quality (manifold, holes, triangle quality)")
     chk_p.add_argument("input_stl", help="Path to STL file to check")
@@ -1279,6 +1404,8 @@ def main():
             do_list_series(args)
         elif args.command == "seed-picker":
             do_seed_picker(args)
+        elif args.command == "sample-hu":
+            sys.exit(do_sample_hu(args))
         elif args.command == "check-mesh":
             sys.exit(do_check_mesh(args))
         elif args.command == "process-mesh":

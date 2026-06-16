@@ -223,6 +223,7 @@ export aneurysm.stl
 | `list` | Show the series available in the currently loaded folder. |
 | `seed` | Open the DICOM slice viewer to click the aneurysm. **Requires DICOM loaded.** |
 | `set-seed X Y Z` | Set the seed point from known world coordinates (read from MeshLab or Meshmixer). Works without DICOM. |
+| `sample-hu [radius]` | Sample the lumen HU distribution in a sphere around the seed (default radius 3 mm) and print percentiles (min/p5/median/p95/p99/max) with suggested `lower`/`upper` thresholds. **Requires DICOM + seed.** Pick thresholds from data instead of trial-and-error. |
 | `status` | Show the pipeline dashboard (what is loaded and ready). |
 | `params` | View and edit pipeline parameters (HU thresholds, `roi_radius`, `use_levelset`, `split_patches`, etc.). |
 | `segment` | Segment the DICOM volume using thresholds and the selected seed. |
@@ -253,6 +254,14 @@ Scan a folder to find available series and their UIDs.
 ```bash
 ./run-cli.sh list-series /path/to/dicom/folder
 ```
+
+### Sample Lumen HU (pick thresholds from data)
+Print the HU distribution in a sphere around the seed so you can choose `--lower-threshold`/`--upper-threshold` from real values instead of trial-and-error.
+```bash
+./run-cli.sh sample-hu /path/to/dicom/folder --seed-ijk 256,256,120
+./run-cli.sh sample-hu /path/to/dicom/folder --seed-mm 12.3,-4.5,67.8 --radius 5
+```
+Reports min/p5/median/mean/p95/p99/max and suggests `upper ≈ p99 + 10%`, `lower ≈ p5`. (Same as the `sample-hu` shell command, which uses the already-loaded seed.)
 
 ### Generate a 3D Model (Basic)
 Process the largest series in the folder with default settings (150–400 HU).
@@ -376,6 +385,18 @@ If the scan contains multiple vessels, use a seed point to isolate the aneurysm.
 | Argument | Default | Description |
 |---|---|---|
 | `folder` | (Required) | Path to the DICOM folder |
+
+### `sample-hu`
+
+| Argument | Default | Description |
+|---|---|---|
+| `folder` | (Required) | Path to the DICOM folder |
+| `--series-uid` | Largest | Specific SeriesInstanceUID to load |
+| `--seed-ijk` | — | Seed as image index `i,j,k` (e.g. from `seed-picker`) |
+| `--seed-mm` | — | Seed as world coordinates `x,y,z` in mm |
+| `--radius` | `3.0` | Sphere radius in mm |
+
+*(One of `--seed-ijk` / `--seed-mm` is required.)*
 
 ---
 

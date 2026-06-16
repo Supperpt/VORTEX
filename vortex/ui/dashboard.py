@@ -162,7 +162,7 @@ def next_commands(session) -> list:
             if c not in ordered:
                 ordered.append(c)
     if not _has_surface(session):
-        for c in ("load", "load-mesh", "list", "seed", "segment", "mesh"):
+        for c in ("load", "load-mesh", "list", "seed", "set-seed", "sample-hu", "segment", "mesh"):
             if c not in ordered:
                 ordered.append(c)
     for c in ("status", "params", "reset", "help", "exit"):

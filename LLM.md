@@ -139,6 +139,17 @@ New shell command `remesh` (`vortex/pipeline/meshing.py:remesh_surface`):
   - Verify with `check` after remesh + the downstream OpenFOAM `checkMesh` skewness.
 - **Verified:** vmtkSurfaceRemeshing available in the vortex-aneurysm env; smoke test on a real STL reduced triangle-area CV (0.57 → 0.28).
 
+### HU Sampling (`sample-hu`) for data-driven thresholds
+New shell command `sample-hu [radius]` (`vortex/pipeline/dicom_loader.py:sample_hu_sphere`):
+- **Why:** Picking `lower`/`upper` HU thresholds was trial-and-error, with a full regeneration per attempt. On an MCA case the level-set perforated the wall ("Swiss cheese") because `upper_threshold` was clipping bright contrast voxels in the lumen (they fell outside the band → negative level-set speed → holes). The user had no quick way to see the real lumen HU range.
+- **What:** samples HU in a physical sphere (default 3 mm, weighted by image spacing so it stays isotropic on anisotropic voxels) around the seed and prints percentiles (min/p5/median/mean/p95/p99/max), plus **informational** suggestions: `upper ≈ p99 + 10%`, `lower ≈ p5` (warns if `<100` HU, near soft tissue). Does **not** mutate `params`.
+- **Where:** shell handler resolves the seed in mm with the same fallback as `clip-sac`/`metrics` (`session.seed_mm`, else `ijk_to_mm(seed_point_ijk)`). Samples `session.sitk_image` — the **raw, immutable** HU volume (segmentation only reassigns it locally via `_crop_roi`/`resample_image`), so values are real HU before threshold/resample. Added to `REPORT_COMMANDS` so the table survives the dashboard redraw.
+- **ACM caveat surfaced in the output:** if bone (~300–1900 HU) overlaps the lumen range, isolate it by space (`roi_radius` / seed component), not by threshold.
+- **Also a non-interactive subcommand:** `./run-cli.sh sample-hu <folder> --seed-ijk i,j,k | --seed-mm x,y,z [--radius N]` (`do_sample_hu`) for scripting/batch. The percentile table + suggestions render via the shared `display_hu_report(stats)` helper used by both the shell command and the subcommand.
+
+### Bulge-field smoothing vectorised (`clip-sac` performance)
+`_smooth_point_scalar` (`vortex/pipeline/sac_clipping.py`) was pure-Python (double loop over cells then over points × iterations), making `clip-sac` scale badly on dense surfaces (e.g. after `remesh`). Rewritten to build the edge adjacency once as a `scipy.sparse` 0/1 matrix and run each iteration as a sparse mat-vec. **Result is mathematically identical** (same `new[i] = 0.5*v[i] + 0.5*mean(unique neighbours)`; verified `np.allclose` vs the old loop, max diff ~2e-16), so no `clip-sac` re-tuning. Falls back to `vtkTriangleFilter` if the input isn't already all-triangles. `scipy` was already a dependency (`cKDTree`).
+
 ### Automated Morphological Metrics
 Implemented a `metrics` command in the interactive shell:
 - Relies on the `seed_point_ijk` to locate the aneurysm dome.
