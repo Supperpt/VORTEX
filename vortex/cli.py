@@ -61,6 +61,11 @@ class Session:
 
 session = Session()
 
+# Commands whose output is transient scrollback (reports/tables). After these
+# run we pause before the dashboard redraw clears the screen, so the user can
+# actually read the result.
+REPORT_COMMANDS = {"check", "metrics", "params", "status", "list", "centerlines"}
+
 # ---------------------------------------------------------------------------
 # CLI Helpers
 # ---------------------------------------------------------------------------
@@ -577,6 +582,7 @@ def do_shell():
                     "  [cyan]seed[/cyan]                    Open DICOM visual seed picker (requires DICOM)\n"
                     "  [cyan]set-seed X Y Z[/cyan]          Set seed coordinates (e.g. read from MeshLab/Meshmixer)\n"
                     "  [cyan]status[/cyan]                  Show pipeline dashboard\n"
+                    "  [cyan]reset [geometry|all][/cyan]   Clear computed mesh/results (geometry), or everything (all)\n"
                     "  [cyan]segment[/cyan]                 Run segmentation\n"
                     "  [cyan]mesh[/cyan]                    Generate mesh\n"
                     "  [cyan]remesh[/cyan]                  Smooth + uniformly remesh the surface for CFD quality (before centerlines)\n"
@@ -598,6 +604,41 @@ def do_shell():
 
             elif cmd == "status":
                 show_status_dashboard(session)
+
+            elif cmd in ("reset", "clear"):
+                scope = parts[1].lower() if len(parts) > 1 else "geometry"
+                if scope not in ("geometry", "all"):
+                    console.print(
+                        "[red]Usage: reset [geometry|all][/red]\n"
+                        "[dim]  geometry (default) — drop mesh/centerlines/sac results, keep DICOM + params\n"
+                        "  all                — drop everything, including the loaded DICOM and params[/dim]"
+                    )
+                else:
+                    # Always clear computed/loaded geometry and downstream results.
+                    session.surface       = None
+                    session.final_surface = None
+                    session.vtk_image     = None
+                    session.centerlines   = None
+                    session.profiles      = []
+                    session.sac_surface   = None
+                    session.parent_vessel = None
+                    session.bulge_surface = None
+                    session.neck_plane    = None
+                    session.cap_labels    = {}
+                    session.clip_sac_view = None
+                    if scope == "all":
+                        session.sitk_image = None
+                        session.folder     = None
+                        session.series_uid = None
+                        session.seed_mm    = None
+                        session.params     = PipelineParams()
+                        console.print("[green]✓ Session reset.[/green] [dim]DICOM, seed and params cleared.[/dim]")
+                    else:
+                        console.print(
+                            "[green]✓ Geometry cleared.[/green] "
+                            "[dim]Mesh, centerlines and sac results dropped; "
+                            "DICOM, seed and params kept.[/dim]"
+                        )
 
             elif cmd == "load":
                 if len(parts) < 2:
@@ -1122,6 +1163,14 @@ def do_shell():
 
             else:
                 console.print(f"[red]Unknown command:[/red] {cmd}")
+
+            # The dashboard clears the screen on the next loop turn. Pause after
+            # commands whose output is a report/table so it can actually be read.
+            if cmd in REPORT_COMMANDS:
+                try:
+                    console.input("\n[vortex.dim]Press Enter to continue...[/vortex.dim]")
+                except (EOFError, KeyboardInterrupt):
+                    pass
 
         except KeyboardInterrupt:
             continue

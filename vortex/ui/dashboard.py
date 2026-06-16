@@ -165,7 +165,7 @@ def next_commands(session) -> list:
         for c in ("load", "load-mesh", "list", "seed", "segment", "mesh"):
             if c not in ordered:
                 ordered.append(c)
-    for c in ("status", "params", "help", "exit"):
+    for c in ("status", "params", "reset", "help", "exit"):
         if c not in ordered:
             ordered.append(c)
     return ordered
