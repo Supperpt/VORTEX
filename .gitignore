@@ -38,6 +38,7 @@ Miniforge3.sh
 # Project Specific Outputs
 output.stl
 *.stl
+*.ply
 *.nii.gz
 *.mhd
 *.raw

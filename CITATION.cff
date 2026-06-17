@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use VORTEX in your research, please cite it as below."
+title: "VORTEX Aneurysm: a DICOM-to-STL pipeline for cerebral aneurysm CFD"
+abstract: >-
+  VORTEX (Vascular Output & Real-time Thresholding EXtraction) is an open-source
+  tool that processes angio-CT/angio-MR DICOM images into high-quality,
+  watertight STL meshes ready for OpenFOAM rigid-wall CFD, FSI simulations, or
+  3D printing of cerebral aneurysms.
+type: software
+authors:
+  - given-names: Diogo
+    family-names: Luz
+    affiliation: "NOVA Medical School, Department of Anatomy"
+version: "1.0.0"
+date-released: "2026-06-17"
+license: MIT
+repository-code: "https://github.com/Supperpt/VORTEX"
+keywords:
+  - cerebral aneurysm
+  - computational fluid dynamics
+  - CFD
+  - DICOM
+  - segmentation
+  - VMTK
+  - OpenFOAM
+  - medical imaging
+# After connecting the repository to Zenodo and publishing the v1.0.0 release,
+# add the minted DOI here, e.g.:
+# doi: "10.5281/zenodo.XXXXXXX"

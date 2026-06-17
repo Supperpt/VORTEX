@@ -1,9 +1,21 @@
 # VORTEX Aneurysm
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
+![Platform](https://img.shields.io/badge/platform-GNU%2FLinux-lightgrey.svg)
+<!-- After connecting the repo to Zenodo and publishing the v1.0.0 release, add the DOI badge here:
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.XXXXXXX.svg)](https://doi.org/10.5281/zenodo.XXXXXXX) -->
+
 **Cerebral aneurysm 3D model pipeline — DICOM → STL for CFD/FSI/3D printing**
 
 VORTEX (Vascular Output & Real-time Thresholding EXtraction) is a tool for processing angio-CT or angio-MR DICOM images into high-quality STL meshes. It is designed to produce watertight models ready for OpenFOAM rigid-wall CFD, FSI simulations, or 3D printing.
 It is designed to be used in GNU/Linux systems. It has not been tested in MacOS/Windows.
+
+VORTEX is driven entirely through a command-line interface and a stateful
+interactive shell (TUI); there is no separate graphical application to install.
+
+> **Citation:** if you use VORTEX in your research, please cite it — see
+> [`CITATION.cff`](CITATION.cff) (GitHub shows a "Cite this repository" button).
 
 ---
 
@@ -26,9 +38,9 @@ This script creates the `vortex-aneurysm` conda environment and installs all dep
 
 ---
 
-## CLI-First Approach (Recommended)
+## CLI-Driven Workflow
 
-To avoid GUI stability issues and X11/Wayland interference (especially on Linux), **VORTEX prioritises a CLI-driven workflow**. The CLI is robust, supports headless execution, and allows for precise parameter control.
+VORTEX is **driven entirely through the command line**. This avoids GUI/GL and X11/Wayland instability (especially on Linux), supports headless execution, and allows precise parameter control. The interactive shell below is the recommended way to use it.
 
 ---
 
