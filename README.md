@@ -3,8 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-GNU%2FLinux-lightgrey.svg)
-<!-- After connecting the repo to Zenodo and publishing the v1.0.0 release, add the DOI badge here:
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.XXXXXXX.svg)](https://doi.org/10.5281/zenodo.XXXXXXX) -->
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20729349.svg)](https://doi.org/10.5281/zenodo.20729349)
 
 **Cerebral aneurysm 3D model pipeline — DICOM → STL for CFD/FSI/3D printing**
 

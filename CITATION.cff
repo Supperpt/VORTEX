@@ -15,6 +15,7 @@ version: "1.0.0"
 date-released: "2026-06-17"
 license: MIT
 repository-code: "https://github.com/Supperpt/VORTEX"
+doi: "10.5281/zenodo.20729349"
 keywords:
   - cerebral aneurysm
   - computational fluid dynamics
@@ -24,6 +25,3 @@ keywords:
   - VMTK
   - OpenFOAM
   - medical imaging
-# After connecting the repository to Zenodo and publishing the v1.0.0 release,
-# add the minted DOI here, e.g.:
-# doi: "10.5281/zenodo.XXXXXXX"
