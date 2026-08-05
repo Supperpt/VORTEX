@@ -6,18 +6,25 @@ Pipeline:
   3. Decimation       → optional triangle reduction (params.reduce_mesh)
   4. Subdivision      → optional mesh refinement (params.increase_mesh)
 
-Entry point:
-  generate_mesh(vtk_image, params, progress_cb) → vtkPolyData
+Entry points:
+  generate_mesh(vtk_image, params, progress_cb)  → vtkPolyData
+  remesh_surface(surface, params, progress_cb)   → vtkPolyData
 """
 
 import logging
 from typing import Callable, Optional
 
+import numpy as np
+
 from vortex.state.app_state import PipelineParams
-from vortex.utils.vtk_compat import vtk
+from vortex.utils.vtk_compat import vtk, vtk_np
 from vortex.pipeline.segmentation import get_iso_value
 
 log = logging.getLogger(__name__)
+
+# Point-data array vmtkSurfaceCurvature writes (name is not configurable).
+# In adaptive mode it carries the per-point target edge length in mm.
+_SIZE_FIELD_ARRAY = "Curvature"
 
 
 # ---------------------------------------------------------------------------
@@ -179,12 +186,33 @@ def remesh_surface(
         _progress(35, "Cleaning input for remesher...")
         surface = _triangulate_and_clean(surface)
 
-        _progress(45, f"Remeshing to uniform {params.remesh_edge_length} mm edges...")
         remesher = vmtkscripts.vmtkSurfaceRemeshing()
-        remesher.Surface = surface
-        remesher.ElementSizeMode = "edgelength"
-        remesher.TargetEdgeLength = params.remesh_edge_length
         remesher.PreserveBoundaryEdges = 1   # keep vessel openings as clean loops for capping
+
+        if params.remesh_adaptive:
+            min_edge = params.remesh_min_edge_length
+            max_edge = params.remesh_edge_length
+            if min_edge <= 0.0 or min_edge >= max_edge:
+                raise ValueError(
+                    f"Adaptive remeshing needs 0 < remesh_min_edge_length "
+                    f"({min_edge}) < remesh_edge_length ({max_edge}). "
+                    "Set 'min_edge' below 'edge' via the params command, "
+                    "or turn 'adaptive' off for uniform remeshing."
+                )
+            _progress(40, f"Computing curvature size field ({min_edge}–{max_edge} mm)...")
+            surface = _curvature_size_field(surface, min_edge, max_edge)
+
+            _progress(45, f"Remeshing (adaptive, {min_edge}–{max_edge} mm edges)...")
+            remesher.Surface = surface
+            remesher.ElementSizeMode = "edgelengtharray"
+            remesher.TargetEdgeLengthArrayName = _SIZE_FIELD_ARRAY
+            remesher.TargetEdgeLengthFactor = 1.0
+        else:
+            _progress(45, f"Remeshing to uniform {params.remesh_edge_length} mm edges...")
+            remesher.Surface = surface
+            remesher.ElementSizeMode = "edgelength"
+            remesher.TargetEdgeLength = params.remesh_edge_length
+
         remesher.Execute()
         surface = remesher.Surface
 
@@ -232,6 +260,57 @@ def remesh_surface(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _curvature_size_field(
+    surface: "vtk.vtkPolyData",
+    min_edge: float,
+    max_edge: float,
+) -> "vtk.vtkPolyData":
+    """Attach a per-point target edge length driven by local surface curvature.
+
+    vmtkSurfaceCurvature with BoundedReciprocal+Offset writes
+
+        size = Offset + 1 / (Epsilon + |curvature|)
+
+    which is bounded by [Offset, Offset + 1/Epsilon].  Mapping that onto the
+    caller's millimetre range is therefore exact:
+
+        Offset  = min_edge                    (size as curvature → ∞)
+        Epsilon = 1 / (max_edge - min_edge)   (size as curvature → 0)
+
+    so flat parent vessel gets *max_edge* triangles while the dome, blebs and
+    neck — where curvature is high and CFD accuracy matters — keep *min_edge*
+    ones.  Uniform sizing had to use min_edge everywhere, which is what made
+    the meshes too heavy to solve (issue #3).
+
+    The array is named 'Curvature' because that is the (non-configurable) name
+    vmtkSurfaceCurvature writes; despite the name it now holds edge lengths in mm.
+    """
+    from vmtk import vmtkscripts
+
+    curv = vmtkscripts.vmtkSurfaceCurvature()
+    curv.Surface = surface
+    curv.CurvatureType = "mean"
+    curv.AbsoluteCurvature = 1     # bulges and dents both deserve fine triangles
+    curv.MedianFiltering = 1       # suppress per-triangle curvature noise
+    curv.BoundedReciprocal = 1
+    curv.Epsilon = 1.0 / (max_edge - min_edge)
+    curv.Offset = min_edge
+    curv.Execute()
+    out = curv.Surface
+
+    arr = out.GetPointData().GetArray(_SIZE_FIELD_ARRAY)
+    if arr is None:
+        raise RuntimeError(
+            f"vmtkSurfaceCurvature did not produce a '{_SIZE_FIELD_ARRAY}' array; "
+            "cannot remesh adaptively. Turn 'adaptive' off to use uniform sizing."
+        )
+    sizes = vtk_np.vtk_to_numpy(arr)
+    log.info("Curvature size field: min %.3f  p50 %.3f  p99 %.3f  max %.3f mm",
+             float(sizes.min()), float(np.percentile(sizes, 50)),
+             float(np.percentile(sizes, 99)), float(sizes.max()))
+    return out
+
 
 def _triangulate_and_clean(poly: "vtk.vtkPolyData") -> "vtk.vtkPolyData":
     """Force pure triangles and merge duplicate points (pre-VMTK hygiene)."""
