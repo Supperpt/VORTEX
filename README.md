@@ -69,7 +69,7 @@ Save the result (e.g. `edited_vessel.stl`).
 
 ```
 load-mesh "edited_vessel.stl"   ← re-import the cleaned mesh
-remesh                          ← smooth + uniformly remesh for CFD quality (recommended; before centerlines)
+remesh                          ← smooth + curvature-adaptive remesh for CFD quality (recommended; before centerlines)
 centerlines                     ← compute vessel centrelines
 extend                          ← add flow extensions + cap all openings
 set-seed X Y Z                  ← type the dome coordinate (get it from MeshLab/Meshmixer)
@@ -94,20 +94,28 @@ This produces, in the export directory (bare names, matching vortex-cfd's defaul
 
 #### Tuning the `remesh` parameters
 
-`remesh` is controlled by two `params` values. The goal is **uniform** triangles
-that still resolve the geometry — uniformity (not small size) is what removes the
-downstream snappyHexMesh skewness.
+`remesh` sizes triangles **by local curvature**: flat parent vessel gets coarse
+triangles, while the dome, blebs and neck — where curvature is high and CFD
+accuracy matters — keep fine ones. What removes downstream snappyHexMesh skewness
+is *regular, well-shaped* triangles, not uniformly tiny ones, and adaptive sizing
+buys that at a fraction of the triangle count.
 
-**`remesh_edge_length`** (mm, key `edge`, default `0.25`, `0` = skip remeshing) —
-target uniform triangle edge length.
-- **Smaller** (e.g. `0.15`) → finer surface, more triangles, better curvature
-  capture on small domes/blebs; but larger STL, slower remesh, heavier CFD mesh.
-- **Larger** (e.g. `0.4–0.5`) → fewer triangles, faster; but if it exceeds the
-  local curvature scale it under-resolves the surface and **re-introduces skew**.
-- Rule of thumb: keep it **≤ the CFD near-wall cell size** (vortex-cfd refines to
-  ~0.125 mm at the wall), so snappyHexMesh has a smooth surface to snap to. For
-  ICA parent vessels (~3–5 mm Ø) `0.2–0.3 mm` works well; drop to `0.15–0.2 mm`
-  for small/complex domes, raise toward `0.4 mm` to keep cell counts down.
+**`remesh_edge_length`** (mm, key `edge`, default `0.5`, `0` = skip remeshing) —
+the **coarsest** edge, used on flat regions.
+- **Larger** (e.g. `0.6`) → fewer triangles, lighter CFD mesh; but if it exceeds
+  the local curvature scale on the flat regions it under-resolves them.
+- **Smaller** (e.g. `0.4`) → more triangles, closer to uniform behaviour.
+
+**`remesh_min_edge_length`** (mm, key `min_edge`, default `0.2`) — the **finest**
+edge, used where curvature is highest. Must be `< edge`.
+- Keep it **≤ the CFD near-wall cell size** (vortex-cfd refines to ~0.125 mm at
+  the wall) so snappyHexMesh has a smooth surface to snap to.
+- Drop to `0.15` for small or complex domes with blebs; raising it above `0.25`
+  starts to blur small morphology.
+
+**`remesh_adaptive`** (key `adaptive`, default `true`) — set `false` to fall back
+to uniform sizing at `edge` everywhere (the pre-1.1 behaviour). Useful mainly for
+comparison or if a pathological surface confuses the curvature estimate.
 
 **`remesh_smooth_iterations`** (key `smooth`, default `20`, `0` = skip smoothing) —
 Taubin smoothing passes applied before remeshing (volume-preserving, so the
@@ -122,10 +130,26 @@ aneurysm is not shrunk).
   double-smoothing; keep smoothing **on** for raw external STLs loaded via
   `load-mesh`.
 
-**How to check your choice:** run `check` after `remesh` (uniform triangles, no
-slivers, good aspect ratio), and confirm the downstream OpenFOAM `checkMesh`
-skewness in vortex-cfd. Adjust `edge`/`smooth` and re-run `remesh` (it operates on
-the current surface, so re-run `mesh`/`load-mesh` first if you want a clean start).
+Measured on the bundled `Test.stl` (5,937 triangles, 3 openings):
+
+| Setting | Triangles | Max aspect ratio | Min angle |
+|---|---|---|---|
+| uniform `0.25` (pre-1.1 default) | 17,798 | 2.93 | 13.1° |
+| **adaptive `0.2–0.5` (default)** | **5,914** | **2.58** | **20.5°** |
+| adaptive `0.2–0.6` | 4,732 | 2.37 | 22.2° |
+
+**How to check your choice:** run `check` after `remesh` — it reports triangle
+quality *and* the per-loop boundary radii, so a torn surface (extra tiny loops)
+is visible before `extend` caps them into phantom patches. Then confirm the
+downstream OpenFOAM `checkMesh` skewness in vortex-cfd. `remesh` operates on the
+current surface, so re-run `mesh`/`load-mesh` first if you want a clean start.
+
+To sweep settings without the interactive shell:
+
+```bash
+./run-cli.sh remesh input.stl -o out.stl --edge 0.5 --min-edge 0.2 --check
+./run-cli.sh remesh input.stl -o out.stl --edge 0.25 --uniform --check   # old behaviour
+```
 
 #### How `clip-sac` works
 
@@ -228,7 +252,7 @@ export aneurysm.stl
 | `params` | View and edit pipeline parameters (HU thresholds, `roi_radius`, `use_levelset`, `split_patches`, etc.). |
 | `segment` | Segment the DICOM volume using thresholds and the selected seed. |
 | `mesh` | Generate the 3D surface mesh from the segmentation. |
-| `remesh` | Taubin-smooth + uniformly remesh the surface (vmtkSurfaceRemeshing) for CFD-grade triangle quality. Run on the lumen surface **before `centerlines`/`extend`**. Tunable via `remesh_edge_length` / `remesh_smooth_iterations` in `params` — see "Tuning the `remesh` parameters" above. |
+| `remesh` | Taubin-smooth + curvature-adaptively remesh the surface (vmtkSurfaceRemeshing) for CFD-grade triangle quality — fine triangles on the dome, coarse on flat vessel. Run on the lumen surface **before `centerlines`/`extend`**. Tunable via `remesh_edge_length` / `remesh_min_edge_length` / `remesh_adaptive` / `remesh_smooth_iterations` in `params` — see "Tuning the `remesh` parameters" above. |
 | `centerlines` | Compute vessel centerlines. |
 | `extend` | Add flow extensions and cap the model. Must run before `clip-sac`. |
 | `metrics` | Calculate morphological metrics for the aneurysm. Works with any seed source. |
@@ -282,10 +306,29 @@ Add `--deep` to also run self-intersection detection (slow on large meshes):
 
 Reports:
 - **Non-manifold edges** — CFD mesher will fail if any are found
-- **Open boundary loops** — count of vessel openings (≥2 expected before `extend`)
+- **Open boundary loops** — count of vessel openings (≥2 expected before `extend`),
+  plus each loop's radius. Loops far smaller than the largest are flagged as
+  suspected **tears**: `extend` would cap each one and `cap_label` would then
+  demand a label for every phantom cap.
 - **Aspect ratio** (mean/max) and **min triangle angle**
 - **Normal consistency** — detects incorrectly oriented faces
 - **Self-intersections** (with `--deep` only)
+
+### Remesh an STL for CFD
+Improve triangle quality without an interactive session — useful for sweeping
+settings or preparing a batch of cases.
+```bash
+./run-cli.sh remesh input.stl -o remeshed.stl --check
+./run-cli.sh remesh input.stl -o remeshed.stl --edge 0.6 --min-edge 0.15 --smooth 0
+```
+
+| Flag | Meaning |
+|---|---|
+| `--edge MM` | Coarsest triangle edge, on flat vessel (default `0.5`) |
+| `--min-edge MM` | Finest triangle edge, where curvature is high (default `0.2`) |
+| `--smooth N` | Taubin smoothing iterations, `0` to skip (default `20`) |
+| `--uniform` | Disable curvature adaptation; use `--edge` everywhere |
+| `--check` | Print a mesh quality report on the result |
 
 ### Process an Existing STL Mesh
 Apply centerlines, flow extensions, and watertight capping to an already segmented STL.
