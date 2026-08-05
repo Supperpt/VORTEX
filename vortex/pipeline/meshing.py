@@ -109,11 +109,16 @@ def generate_mesh(
     cleaner.Update()
     surface = cleaner.GetOutput()
 
-    # Recompute normals for correct rendering
+    # Recompute normals for correct rendering.
+    # SplittingOff is essential: with VTK's default SplittingOn, points are
+    # duplicated along every feature edge (>30 deg), which tears the mesh
+    # topologically and makes vtkFeatureEdges report each seam as an open
+    # boundary loop.  See remesh_surface() for the same guard.
     normals = vtk.vtkPolyDataNormals()
     normals.SetInputData(surface)
     normals.ConsistencyOn()
     normals.AutoOrientNormalsOn()
+    normals.SplittingOff()
     normals.Update()
     surface = normals.GetOutput()
 
@@ -147,15 +152,18 @@ def remesh_surface(
             progress_cb(pct, msg)
         log.debug("[%3d%%] %s", pct, msg)
 
+    from vortex.pipeline.mesh_quality import _count_boundary_loops
+
     n_before = surface.GetNumberOfCells()
-    _progress(0, f"Preparing surface ({n_before:,} triangles)...")
+    loops_before = _count_boundary_loops(surface)
+    _progress(0, f"Preparing surface ({n_before:,} triangles, {loops_before} opening(s))...")
 
     # 1. Taubin smoothing pass (volume-preserving noise removal).
     if params.remesh_smooth_iterations > 0:
         _progress(20, f"Smoothing surface (Taubin, {params.remesh_smooth_iterations} iter)...")
         surface = _taubin_smooth(surface, iterations=params.remesh_smooth_iterations, pass_band=0.1)
 
-    # 2. Uniform isotropic remeshing via VMTK.
+    # 2. Isotropic remeshing via VMTK.
     if params.remesh_edge_length > 0.0:
         try:
             from vmtk import vmtkscripts
@@ -164,6 +172,12 @@ def remesh_surface(
                 "VMTK is required for surface remeshing. "
                 "Make sure vmtk is installed in the vortex-aneurysm env."
             ) from exc
+
+        # vmtkSurfaceRemeshing needs pure triangles and merged points — STLs
+        # loaded via `load-mesh` routinely carry unmerged duplicates, which
+        # make the remesher punch holes.  Same pre-VMTK guard as centerlines.
+        _progress(35, "Cleaning input for remesher...")
+        surface = _triangulate_and_clean(surface)
 
         _progress(45, f"Remeshing to uniform {params.remesh_edge_length} mm edges...")
         remesher = vmtkscripts.vmtkSurfaceRemeshing()
@@ -174,26 +188,61 @@ def remesh_surface(
         remesher.Execute()
         surface = remesher.Surface
 
+        cleaner = vtk.vtkCleanPolyData()
+        cleaner.SetInputData(surface)
+        cleaner.Update()
+        surface = cleaner.GetOutput()
+
     # 3. Keep the largest region and recompute normals.
     _progress(80, "Cleaning up...")
     surface = _largest_region(surface)
+
+    # SplittingOff is NOT optional here.  VTK defaults to SplittingOn with a
+    # 30 deg feature angle, which duplicates points along every feature edge.
+    # That tears the surface topologically, so vtkFeatureEdges then counts each
+    # seam as an open boundary -> vmtkCapper caps them -> `cap_label` enumerates
+    # dozens of phantom caps (issue #4).  Measured on Test.stl: 3 real openings
+    # became 12 with splitting on, 3 with it off.
     normals = vtk.vtkPolyDataNormals()
     normals.SetInputData(surface)
     normals.ConsistencyOn()
     normals.AutoOrientNormalsOn()
+    normals.SplittingOff()
     normals.Update()
     surface = normals.GetOutput()
 
+    # 4. Post-condition: remeshing must preserve the opening count.  Anything
+    #    else means the surface was torn and capping/CFD downstream will be wrong.
     n_after = surface.GetNumberOfCells()
-    _progress(100, f"Remesh done: {n_before:,} → {n_after:,} triangles")
-    log.info("Remesh: %d → %d triangles (edge=%.3f mm, smooth=%d iter)",
-             n_before, n_after, params.remesh_edge_length, params.remesh_smooth_iterations)
+    loops_after = _count_boundary_loops(surface)
+    if loops_after > loops_before:
+        msg = (f"Remesh changed the opening count ({loops_before} → {loops_after}) — "
+               "the surface was likely torn. Inspect with 'check' before capping.")
+        log.warning(msg)
+        _progress(95, f"WARNING: {msg}")
+
+    _progress(100, f"Remesh done: {n_before:,} → {n_after:,} triangles, "
+                   f"{loops_after} opening(s)")
+    log.info("Remesh: %d → %d triangles, %d → %d openings (edge=%.3f mm, smooth=%d iter)",
+             n_before, n_after, loops_before, loops_after,
+             params.remesh_edge_length, params.remesh_smooth_iterations)
     return surface
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _triangulate_and_clean(poly: "vtk.vtkPolyData") -> "vtk.vtkPolyData":
+    """Force pure triangles and merge duplicate points (pre-VMTK hygiene)."""
+    tri = vtk.vtkTriangleFilter()
+    tri.SetInputData(poly)
+    tri.Update()
+    cleaner = vtk.vtkCleanPolyData()
+    cleaner.SetInputData(tri.GetOutput())
+    cleaner.Update()
+    return cleaner.GetOutput()
+
 
 def _largest_region(poly: "vtk.vtkPolyData") -> "vtk.vtkPolyData":
     conn = vtk.vtkPolyDataConnectivityFilter()
