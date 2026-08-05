@@ -222,15 +222,33 @@ def display_quality_report(report: dict):
 
     # Boundary loops
     loops = report['boundary_loops']
+    tears = report.get('suspect_tear_loops') or []
     if loops == 0:
         stats_table.add_row("Open Boundary Loops",
             "[green]✓ 0 (closed)[/green]", "Watertight")
+    elif tears:
+        stats_table.add_row("Open Boundary Loops",
+            f"[red]✗ {loops}[/red]",
+            f"{len(tears)} look like tears, not openings")
     elif loops >= 2:
         stats_table.add_row("Open Boundary Loops",
             f"[yellow]⚠ {loops}[/yellow]", "Expected before 'extend'")
     else:
         stats_table.add_row("Open Boundary Loops",
             f"[red]✗ {loops}[/red]", "Need ≥2 for CFD")
+
+    # Per-loop radii — a bare count cannot separate real vessel ends from tears
+    profiles = report.get('boundary_loop_profiles') or []
+    if profiles:
+        tear_ids = {p['id'] for p in tears}
+        shown = profiles[:8]
+        parts = []
+        for p in shown:
+            r = f"{p['radius_mm']:.2f}"
+            parts.append(f"[red]{r}✗[/red]" if p['id'] in tear_ids else r)
+        detail = ", ".join(parts) + ("  …" if len(profiles) > len(shown) else "")
+        stats_table.add_row("  Loop radii (mm)", detail,
+                            "✗ = suspected tear" if tears else "")
 
     # Triangle quality
     q = report.get('triangle_quality')
@@ -1159,6 +1177,23 @@ def do_shell():
                             "[vortex.accent]view[/vortex.accent] and press "
                             "[vortex.accent]c[/vortex.accent] to see cap numbers on the model.[/vortex.dim]"
                         )
+                        # Caps far smaller than the largest are usually capped
+                        # tears rather than vessel ends. Warn instead of
+                        # filtering — a genuine small distal outlet looks the
+                        # same, and silently dropping it would break the CFD
+                        # boundary conditions.
+                        max_area = max(area for *_, area in caps)
+                        specks = [uid for uid, _p, _c, area in caps
+                                  if max_area > 0 and area <= 0.02 * max_area]
+                        if specks:
+                            console.print(
+                                f"[red]Warning:[/red] {len(specks)} cap(s) are under 2% of the "
+                                f"largest cap's area ({max_area:.1f} mm²): "
+                                f"{', '.join(str(u) for u in specks)}.\n"
+                                "[dim]These are usually capped tears in the surface, not vessel "
+                                "openings. Consider aborting (Ctrl-C), running 'check' on the "
+                                "pre-extend surface, and re-running 'remesh' → 'extend'.[/dim]"
+                            )
                         cap_labels: dict = {}
                         outlet_n = 0
                         for uid, _poly, centroid, area in caps:
