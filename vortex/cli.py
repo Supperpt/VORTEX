@@ -65,7 +65,7 @@ session = Session()
 # run we pause before the dashboard redraw clears the screen, so the user can
 # actually read the result.
 REPORT_COMMANDS = {"check", "metrics", "params", "status", "list", "centerlines",
-                   "sample-hu", "sample_hu"}
+                   "sample-hu", "sample_hu", "remesh"}
 
 # ---------------------------------------------------------------------------
 # CLI Helpers
@@ -474,9 +474,57 @@ def do_seed_picker(args):
         console.print("\n[red]Seed picker closed without selection.[/red]")
         return None
 
+def do_remesh(args):
+    """Headless surface remeshing: STL in → STL out.
+
+    Mirrors the shell's `remesh` command so edge-length sweeps and CFD
+    validation runs can be scripted instead of driven interactively.
+    """
+    from vortex.utils.vtk_compat import vtk
+
+    if not os.path.exists(args.input_stl):
+        console.print(f"[bold red]Input STL file not found: {args.input_stl}[/bold red]")
+        return 1
+
+    params = PipelineParams(
+        remesh_adaptive=not args.uniform,
+        remesh_edge_length=args.edge,
+        remesh_min_edge_length=args.min_edge,
+        remesh_smooth_iterations=args.smooth,
+    )
+
+    reader = vtk.vtkSTLReader()
+    reader.SetFileName(args.input_stl)
+    reader.Update()
+    surface = reader.GetOutput()
+
+    if surface.GetNumberOfCells() == 0:
+        console.print("[bold red]The input STL mesh is empty or invalid.[/bold red]")
+        return 1
+
+    mode = (f"adaptive {args.min_edge}–{args.edge} mm"
+            if params.remesh_adaptive else f"uniform {args.edge} mm")
+    console.print(f"\n[bold blue]Remeshing:[/bold blue] {args.input_stl}  "
+                  f"[dim]({mode}, smooth {args.smooth} iter)[/dim]")
+
+    remeshed = run_pipeline_step("Remeshing", remesh_surface, surface, params)
+    if remeshed is None:
+        return 1
+    run_pipeline_step("Exporting STL", export_stl, remeshed, args.output, params)
+
+    console.print(f"\n[bold green]Done![/bold green] "
+                  f"{surface.GetNumberOfCells():,} → {remeshed.GetNumberOfCells():,} triangles → "
+                  f"[cyan]{args.output}[/cyan]")
+
+    if args.check:
+        report = check_mesh_quality(remeshed, deep=False)
+        display_quality_report(report)
+    return 0
+
+
 def do_process_mesh(args):
     from vortex.utils.vtk_compat import vtk
-    
+
     if not os.path.exists(args.input_stl):
         console.print(f"[bold red]Input STL file not found: {args.input_stl}[/bold red]")
         return 1
@@ -833,14 +881,38 @@ def do_shell():
                         # run on the coarse surface, not the dense remeshed one). Centerlines
                         # computed AFTER remesh on the fine surface are very slow.
                         had_centerlines = session.centerlines is not None
+
+                        # Anything derived from the OLD triangulation is now stale.
+                        # final_surface above is the uncapped lumen, so cap_labels
+                        # would point at CellEntityIds that no longer exist and get
+                        # handed straight to export_stl. 'extend' clears them for the
+                        # same reason.
+                        dropped = []
+                        if session.cap_labels:
+                            session.cap_labels = {}
+                            dropped.append("cap labels")
+                        if session.sac_surface is not None or session.parent_vessel is not None:
+                            dropped.append("clip-sac patches")
+                        session.sac_surface = None
+                        session.parent_vessel = None
+                        session.neck_plane = None
+                        session.bulge_surface = None
+                        session.clip_sac_view = None
+
                         next_step = "'extend'" if had_centerlines else "'centerlines' → 'extend'"
+                        mode = ("adaptive "
+                                f"{session.params.remesh_min_edge_length}–{session.params.remesh_edge_length} mm"
+                                if session.params.remesh_adaptive
+                                else f"uniform {session.params.remesh_edge_length} mm")
                         console.print(
                             f"[green]Remeshed:[/green] {n_before:,} → "
                             f"{remeshed.GetNumberOfCells():,} triangles "
-                            f"(edge {session.params.remesh_edge_length} mm, "
-                            f"smooth {session.params.remesh_smooth_iterations} iter)\n"
+                            f"({mode}, smooth {session.params.remesh_smooth_iterations} iter)\n"
                             + ("[dim]Kept existing centerlines (still valid after remesh).[/dim]\n"
                                if had_centerlines else "")
+                            + (f"[yellow]Cleared {' and '.join(dropped)}[/yellow] "
+                               "[dim](stale after retriangulation — re-run those steps).[/dim]\n"
+                               if dropped else "")
                             + f"[dim]Re-run {next_step} → 'clip-sac' → 'cap_label' → 'export'.[/dim]"
                         )
 
@@ -1252,7 +1324,9 @@ def do_shell():
                 table.add_row("levelset_curvature", str(p.levelset_curvature))
                 table.add_row("levelset_propagation", str(p.levelset_propagation))
                 table.add_row("flow_ext_ratio", str(p.flow_ext_ratio))
-                table.add_row("remesh_edge_length", str(p.remesh_edge_length))
+                table.add_row("remesh_adaptive", str(p.remesh_adaptive))
+                table.add_row("remesh_edge_length", f"{p.remesh_edge_length}  (coarsest)")
+                table.add_row("remesh_min_edge_length", f"{p.remesh_min_edge_length}  (finest, adaptive only)")
                 table.add_row("remesh_smooth_iterations", str(p.remesh_smooth_iterations))
                 table.add_row("output_mode", "fsi" if p.build_wall else "solid" if p.solid else "cfd")
                 table.add_row("split_patches", str(p.split_patches))
@@ -1260,7 +1334,7 @@ def do_shell():
 
                 console.print(table)
                 if Confirm.ask("Edit a parameter?"):
-                    key = Prompt.ask("Parameter name", choices=["lower", "upper", "resample", "roi", "levelset", "ls_iter", "ls_curv", "ls_prop", "ratio", "edge", "smooth", "split", "sac_ratio"])
+                    key = Prompt.ask("Parameter name", choices=["lower", "upper", "resample", "roi", "levelset", "ls_iter", "ls_curv", "ls_prop", "ratio", "adaptive", "edge", "min_edge", "smooth", "split", "sac_ratio"])
                     val = Prompt.ask("New value")
                     if key == "lower": p.lower_threshold = float(val)
                     if key == "upper": p.upper_threshold = float(val)
@@ -1271,7 +1345,9 @@ def do_shell():
                     if key == "ls_curv": p.levelset_curvature = float(val)
                     if key == "ls_prop": p.levelset_propagation = float(val)
                     if key == "ratio": p.flow_ext_ratio = float(val)
+                    if key == "adaptive": p.remesh_adaptive = (val.lower() == "true")
                     if key == "edge": p.remesh_edge_length = float(val)
+                    if key == "min_edge": p.remesh_min_edge_length = float(val)
                     if key == "smooth": p.remesh_smooth_iterations = int(val)
                     if key == "split": p.split_patches = (val.lower() == "true")
                     if key == "sac_ratio": p.sac_bulge_ratio = float(val)
@@ -1337,6 +1413,24 @@ def create_parser() -> argparse.ArgumentParser:
                        help="Export bad triangles (above --ar-threshold) to this STL file")
     chk_p.add_argument("--ar-threshold", type=float, default=20.0, metavar="N",
                        help="Aspect-ratio threshold for bad-triangle detection (default: 20.0)")
+
+    # Command: remesh
+    rm_p = subparsers.add_parser("remesh",
+                                 help="Remesh an STL for CFD-grade triangle quality (curvature-adaptive)")
+    rm_p.add_argument("input_stl", help="Path to input STL file")
+    rm_p.add_argument("--output", "-o", default="remeshed.stl", help="Path to output STL file")
+    rm_p.add_argument("--edge", type=float, default=0.5, metavar="MM",
+                      help="Coarsest triangle edge, on flat vessel (default: 0.5). "
+                           "Uniform edge length when --uniform is given.")
+    rm_p.add_argument("--min-edge", type=float, default=0.2, metavar="MM",
+                      help="Finest triangle edge, where curvature is high (default: 0.2). Adaptive only.")
+    rm_p.add_argument("--smooth", type=int, default=20, metavar="N",
+                      help="Taubin smoothing iterations, 0 to skip (default: 20). "
+                           "Use 0 on a surface already smoothed by 'mesh'.")
+    rm_p.add_argument("--uniform", action="store_true",
+                      help="Disable curvature adaptation and use --edge everywhere")
+    rm_p.add_argument("--check", action="store_true",
+                      help="Print a mesh quality report on the result")
 
     # Command: process-mesh
     mesh_p = subparsers.add_parser("process-mesh", help="Apply centerlines/extensions/capping to an existing STL")
@@ -1408,6 +1502,8 @@ def main():
             sys.exit(do_sample_hu(args))
         elif args.command == "check-mesh":
             sys.exit(do_check_mesh(args))
+        elif args.command == "remesh":
+            sys.exit(do_remesh(args))
         elif args.command == "process-mesh":
             sys.exit(do_process_mesh(args))
         elif args.command == "process":

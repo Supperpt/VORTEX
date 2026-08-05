@@ -306,10 +306,75 @@ def _curvature_size_field(
             "cannot remesh adaptively. Turn 'adaptive' off to use uniform sizing."
         )
     sizes = vtk_np.vtk_to_numpy(arr)
+    _blend_size_field_to_boundaries(out, sizes, max_edge)
+    arr.Modified()
+
     log.info("Curvature size field: min %.3f  p50 %.3f  p99 %.3f  max %.3f mm",
              float(sizes.min()), float(np.percentile(sizes, 50)),
              float(np.percentile(sizes, 99)), float(sizes.max()))
     return out
+
+
+def _blend_size_field_to_boundaries(
+    surface: "vtk.vtkPolyData",
+    sizes: "np.ndarray",
+    max_edge: float,
+) -> None:
+    """Taper *sizes* (in place) toward the existing edge spacing at open rims.
+
+    PreserveBoundaryEdges=1 keeps the input's boundary edges verbatim, so where
+    the rim is finely discretised but the curvature field asks for coarse
+    interior triangles, the remesher bridges the two with slivers.  On Test.stl
+    that produced aspect ratios up to 12 and 4-degree angles right at the
+    openings — the one place the mesh must stay clean, since flow extensions
+    and caps attach there.
+
+    Fix: within a band of 3*max_edge from a rim, blend the target size linearly
+    toward the local boundary edge length, so triangles grow gradually instead
+    of in one step.  Measured effect: max aspect ratio 12.3 -> 4.65, zero
+    triangles above 5, min angle 4.1 -> 7.9 deg, for ~20% more triangles.
+    """
+    from scipy.spatial import cKDTree
+
+    edges = vtk.vtkFeatureEdges()
+    edges.SetInputData(surface)
+    edges.BoundaryEdgesOn()
+    edges.FeatureEdgesOff()
+    edges.ManifoldEdgesOff()
+    edges.NonManifoldEdgesOff()
+    edges.Update()
+    boundary = edges.GetOutput()
+    if boundary.GetNumberOfCells() == 0:
+        return  # closed surface — nothing to taper toward
+
+    # Midpoint and length of every boundary edge.
+    mids, lengths = [], []
+    for i in range(boundary.GetNumberOfCells()):
+        pts = boundary.GetCell(i).GetPoints()
+        if pts.GetNumberOfPoints() != 2:
+            continue
+        a = np.array(pts.GetPoint(0))
+        b = np.array(pts.GetPoint(1))
+        mids.append((a + b) / 2.0)
+        lengths.append(float(np.linalg.norm(a - b)))
+    if not mids:
+        return
+
+    mids = np.asarray(mids)
+    lengths = np.asarray(lengths)
+    tree = cKDTree(mids)
+
+    points = vtk_np.vtk_to_numpy(surface.GetPoints().GetData())
+    band = 3.0 * max_edge
+    dist, idx = tree.query(points, k=min(8, len(mids)))
+    if dist.ndim == 1:                       # k == 1
+        dist, idx = dist[:, None], idx[:, None]
+
+    # Median of the nearest few edges — a single edge length is far too noisy
+    # (p5/p50 on Test.stl differ by 7x).
+    local_edge = np.median(lengths[idx], axis=1)
+    w = np.clip(dist[:, 0] / band, 0.0, 1.0)     # 0 at the rim, 1 beyond the band
+    sizes[:] = np.minimum(sizes, local_edge * (1.0 - w) + sizes * w)
 
 
 def _triangulate_and_clean(poly: "vtk.vtkPolyData") -> "vtk.vtkPolyData":
