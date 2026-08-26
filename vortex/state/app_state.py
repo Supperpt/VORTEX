@@ -31,8 +31,10 @@ class PipelineParams:
     reduce_mesh: float = 0.0         # fraction of triangles to remove (0=none, 1=all)
     increase_mesh: int = 0           # Loop subdivision passes (~4x triangles each)
 
-    # Surface prep (remesh command) — uniform isotropic remeshing + smoothing
-    remesh_edge_length: float = 0.25     # mm — uniform triangle edge length (0=skip). Smaller=finer/heavier; keep <= CFD near-wall cell (~0.125mm). ICA ~0.2-0.3, small domes 0.15-0.2.
+    # Surface prep (remesh command) — curvature-adaptive remeshing + smoothing
+    remesh_adaptive: bool = True         # size triangles by local curvature (False = uniform edge everywhere, the pre-1.1 behaviour)
+    remesh_edge_length: float = 0.5      # mm — COARSEST edge, used on flat parent vessel (0=skip remeshing). Uniform target when remesh_adaptive=False.
+    remesh_min_edge_length: float = 0.2  # mm — FINEST edge, used where curvature is high (dome, blebs, neck). Adaptive mode only; must be < remesh_edge_length.
     remesh_smooth_iterations: int = 20   # Taubin iterations in remesh pass (0=skip). More=less noise but rounds off blebs; set 0 after `mesh` (already smooths 30), keep on for load-mesh STLs.
 
     # Output mode
@@ -62,7 +64,9 @@ class PipelineParams:
             flow_ext_selected=list(self.flow_ext_selected) if self.flow_ext_selected else None,
             reduce_mesh=self.reduce_mesh,
             increase_mesh=self.increase_mesh,
+            remesh_adaptive=self.remesh_adaptive,
             remesh_edge_length=self.remesh_edge_length,
+            remesh_min_edge_length=self.remesh_min_edge_length,
             remesh_smooth_iterations=self.remesh_smooth_iterations,
             build_wall=self.build_wall,
             wall_thickness=self.wall_thickness,

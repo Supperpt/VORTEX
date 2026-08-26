@@ -1,6 +1,6 @@
 # VORTEX Aneurysm — Implementation State & Pivot Summary
 
-_Last updated: June 8, 2026_
+_Last updated: August 5, 2026_
 
 ---
 
@@ -128,16 +128,27 @@ Added a command to apply VMTK operations to existing STL files:
 - Useful for meshes generated in other tools (e.g., 3D Slicer, Horos).
 
 ### Surface Remeshing (`remesh`) for CFD-grade triangle quality
-New shell command `remesh` (`vortex/pipeline/meshing.py:remesh_surface`):
-- **Why:** A vortex-cfd run (patient AA_011) tripped OpenFOAM's checkMesh skewness gate. Root cause is surface quality — irregular/non-uniform STL triangulation in high-curvature regions forces snappyHexMesh into skewed boundary-layer cells. VORTEX already Taubin-smooths in `mesh`, but had **no uniform isotropic remeshing**, the standard vmtk CFD-prep step.
-- **What:** optional Taubin smoothing pass (reuses `_taubin_smooth`) + `vmtkSurfaceRemeshing` (`ElementSizeMode="edgelength"`, `TargetEdgeLength=params.remesh_edge_length`, `PreserveBoundaryEdges=1` to keep openings clean for flow extensions) + largest-region + normals.
-- **Where:** operates on `session.surface` (the open lumen) and **must run before `centerlines`/`extend`** — it does not touch cap `CellEntityIds` (none exist yet) and preserves the open boundary loops. The `remesh` handler resets `session.centerlines`/`profiles` (geometry changed) like `load-mesh` does. Works on a `load-mesh`-loaded STL too, so already-segmented geometries can be improved.
-- **Params:** `remesh_edge_length` (mm, default 0.25, 0=skip) and `remesh_smooth_iterations` (default 20, 0=skip) in `PipelineParams`; editable via the `params` command (keys `edge` / `smooth`).
-- **Tuning (documented in README "Tuning the `remesh` parameters"):**
-  - `edge` ↓ = finer/more triangles, better curvature capture, heavier CFD mesh; ↑ = fewer/faster but if it exceeds the local curvature scale it re-introduces skew. Keep it ≤ the CFD near-wall cell size (~0.125 mm in vortex-cfd); ICA vessels ~0.2–0.3 mm, small domes 0.15–0.2 mm. Uniformity (not small size) is what fixes skew.
-  - `smooth` ↑ = removes segmentation noise/spikes but can round off real blebs/daughter sacs; ↓/0 preserves detail. Taubin is volume-preserving (no sac shrinkage). `mesh` already smooths 30 iter → set `smooth 0` when remeshing a freshly-meshed surface; keep it on for raw `load-mesh` STLs.
-  - Verify with `check` after remesh + the downstream OpenFOAM `checkMesh` skewness.
-- **Verified:** vmtkSurfaceRemeshing available in the vortex-aneurysm env; smoke test on a real STL reduced triangle-area CV (0.57 → 0.28).
+Shell command `remesh` + headless `./run-cli.sh remesh` (`vortex/pipeline/meshing.py:remesh_surface`):
+- **Why:** A vortex-cfd run (patient AA_011) tripped OpenFOAM's checkMesh skewness gate. Root cause is surface quality — irregular/non-uniform STL triangulation in high-curvature regions forces snappyHexMesh into skewed boundary-layer cells. VORTEX already Taubin-smooths in `mesh`, but had **no isotropic remeshing**, the standard vmtk CFD-prep step.
+- **What:** optional Taubin smoothing (reuses `_taubin_smooth`) → triangulate+clean → `vmtkSurfaceRemeshing` → clean → largest-region → normals **with `SplittingOff()`**.
+- **Where:** operates on `session.surface` (the open lumen) and **must run before `centerlines`/`extend`** — it does not touch cap `CellEntityIds` (none exist yet) and preserves the open boundary loops. The handler **keeps** `session.centerlines`/`profiles` (remeshing is volume-preserving and preserves the openings, so they stay valid — and computing centerlines on the dense remeshed surface is very slow), but **clears** `cap_labels` and all `clip-sac` products, which are keyed to the old triangulation. Works on a `load-mesh`-loaded STL too.
+
+#### ⚠️ `SplittingOn` tore the surface (issue #4 — do not re-introduce)
+`remesh_surface` and `generate_mesh` ended with `vtkPolyDataNormals` left at VTK's **default `SplittingOn`** (feature angle 30°). That duplicates points along every feature edge, tearing the mesh topologically. `vtkFeatureEdges(BoundaryEdgesOn)` then counts each seam as an open boundary → `vmtkCapper` caps every one → `cap_label` demands a label per phantom cap.
+- Measured on `Test.stl` (3 real openings): **12 boundary loops** with splitting on, **3** with it off. Full pipeline: **8 caps** pre-fix (5 slivers of 0.03–0.12 mm² alongside the 3 real ones at 2.0/3.0/6.3 mm²) → **3 caps** post-fix.
+- Every other normals call in the codebase already disables splitting. `remesh_surface` now also runs a **boundary-loop post-condition guard** (warns if the opening count grew) so this class of corruption is never silent again.
+
+#### Curvature-adaptive sizing (issue #3)
+Uniform `edge=0.25` had to use the dome's required resolution everywhere → ~157k triangles on a small dome → snappyHexMesh mesh too heavy to solve (contributed to the AA_011 GAMG pressure crash, vortex-cfd BUG-013).
+- `_curvature_size_field()` uses `vmtkSurfaceCurvature` with `BoundedReciprocal`, whose field is `size = Offset + 1/(Epsilon + |k|)`, bounded by `[Offset, Offset + 1/Epsilon]`. So **`Offset = min_edge`** and **`Epsilon = 1/(max_edge - min_edge)`** maps it exactly onto a mm range. Fed to `vmtkSurfaceRemeshing` as `ElementSizeMode="edgelengtharray"`, `TargetEdgeLengthArrayName="Curvature"` (the array name is not configurable; despite the name it holds edge lengths in mm), `TargetEdgeLengthFactor=1.0`.
+- **Rim taper (`_blend_size_field_to_boundaries`)**: `PreserveBoundaryEdges=1` keeps the input rim verbatim, so a finely discretised opening next to coarse adaptive interior triangles gets bridged by slivers — every triangle above AR 5 sat within 0.6 mm of a boundary, exactly where caps and extensions attach. Within `3×max_edge` of a rim the target size is blended toward the local boundary edge length (median of the 8 nearest boundary edges — a single edge length is far too noisy). Effect: **AR max 20.15 → 2.58, min angle 2.5° → 20.5°**, for ~20% more triangles.
+- **Params:** `remesh_adaptive` (default True), `remesh_edge_length` (now the **coarsest** edge, default raised 0.25 → 0.5), `remesh_min_edge_length` (finest, default 0.2), `remesh_smooth_iterations` (20). Shell `params` keys: `adaptive` / `edge` / `min_edge` / `smooth`. Guarded with a clear `ValueError` if `min_edge >= edge`.
+- **Measured on `Test.stl`** (5,937 tris, 3 openings): uniform 0.25 → 17,798 tris, AR max 2.93, min angle 13.1°. Adaptive 0.2–0.5 → **5,914 tris, AR max 2.58, min angle 20.5°** — 3× lighter *and* better shaped.
+
+#### Diagnostics
+- `check` now reports **per-loop boundary radii** (reusing `centerlines._detect_boundary_profiles`) and flags loops ≤15% of the largest radius as suspected tears (`_TEAR_RADIUS_FRACTION`, requires ≥3 loops so a real inlet + small distal outlet is never flagged). A bare loop count could not tell 3 openings from 3 openings + 44 tears.
+- `cap_label` warns when a cap is under 2% of the largest cap's area. **Warns, does not filter** — a genuine small distal outlet looks the same, and silently dropping one would break the CFD boundary conditions.
+- Headless `./run-cli.sh remesh <in.stl> -o <out.stl> [--edge --min-edge --smooth --uniform --check]` (`do_remesh`) makes parameter sweeps and batch CFD validation scriptable; `remesh` was previously shell-only.
 
 ### HU Sampling (`sample-hu`) for data-driven thresholds
 New shell command `sample-hu [radius]` (`vortex/pipeline/dicom_loader.py:sample_hu_sphere`):
@@ -242,6 +253,43 @@ Configured `vmtkCapper` to output `CellEntityIds`:
 
 **Problem 3 — `sac_bulge_heatmap.ply` always written to CWD**: The heatmap was hardcoded to `os.path.abspath("sac_bulge_heatmap.ply")` during `clip-sac`, so when the user ran `export path/to/dir` the STL files went to `path/to/dir/` but the heatmap stayed in the program's working directory.
 - **Fix** (`vortex/cli.py`, `export` command): After `export_stl` returns the resolved output path, if `session.bulge_surface` is set (i.e. `clip-sac` was run), the heatmap is re-written to the same directory as the exported STLs. The immediate post-`clip-sac` write to CWD is preserved for quick diagnostic inspection.
+
+---
+
+## 🧭 NEXT STEPS
+
+### Pending: validation required to accept the `remesh` PR
+
+Branch `feature/remesh-conclusion` → PR into `in_developement`. The code for
+milestone **"Conclude remesh functionality"** (issues #3, #4, #5) is complete and
+verified on the synthetic `Test.stl`, but **the PR must not be merged until a real
+patient case has been validated end-to-end through vortex-cfd** (issue #5 is the
+milestone's definition of done).
+
+**Acceptance criteria — all must pass on one real case before merging:**
+
+1. **VORTEX side.** Run the full pipeline with the new defaults
+   (`remesh_adaptive=True`, `edge=0.5`, `min_edge=0.2`), then `check`:
+   - boundary loop count equals the real number of vessel openings, with **no
+     loops flagged as suspected tears**;
+   - **0 non-manifold edges**;
+   - max aspect ratio **< 5** and min triangle angle **> 10°**;
+   - `cap_label` offers **exactly** the real openings — no phantom-cap warning.
+2. **Mesh generation.** `snappyHexMesh` completes and OpenFOAM **`checkMesh`
+   passes its skewness gate** — this is the gate that failed on AA_011 and opened
+   the milestone.
+3. **Solve.** The case **runs to completion without the GAMG pressure-solver
+   crash** (vortex-cfd BUG-013), and **WSS values are physiologically plausible**.
+4. **Cell count is tractable** — materially below what uniform `edge=0.25`
+   produced (~157k surface triangles on a small dome).
+
+**Preferred case:** AA_011, the MRI-derived case whose failure opened the
+milestone — re-validating it closes the loop directly. A CT/angio case that
+already worked is worth a second run to confirm no regression.
+
+Record the outcome in the PR before merging. If validation fails, the likely knobs
+are `edge` (raise to lighten the mesh) and `min_edge` (lower to resolve the dome),
+in that order — see README "Tuning the `remesh` parameters".
 
 ---
 

@@ -6,18 +6,25 @@ Pipeline:
   3. Decimation       → optional triangle reduction (params.reduce_mesh)
   4. Subdivision      → optional mesh refinement (params.increase_mesh)
 
-Entry point:
-  generate_mesh(vtk_image, params, progress_cb) → vtkPolyData
+Entry points:
+  generate_mesh(vtk_image, params, progress_cb)  → vtkPolyData
+  remesh_surface(surface, params, progress_cb)   → vtkPolyData
 """
 
 import logging
 from typing import Callable, Optional
 
+import numpy as np
+
 from vortex.state.app_state import PipelineParams
-from vortex.utils.vtk_compat import vtk
+from vortex.utils.vtk_compat import vtk, vtk_np
 from vortex.pipeline.segmentation import get_iso_value
 
 log = logging.getLogger(__name__)
+
+# Point-data array vmtkSurfaceCurvature writes (name is not configurable).
+# In adaptive mode it carries the per-point target edge length in mm.
+_SIZE_FIELD_ARRAY = "Curvature"
 
 
 # ---------------------------------------------------------------------------
@@ -109,11 +116,16 @@ def generate_mesh(
     cleaner.Update()
     surface = cleaner.GetOutput()
 
-    # Recompute normals for correct rendering
+    # Recompute normals for correct rendering.
+    # SplittingOff is essential: with VTK's default SplittingOn, points are
+    # duplicated along every feature edge (>30 deg), which tears the mesh
+    # topologically and makes vtkFeatureEdges report each seam as an open
+    # boundary loop.  See remesh_surface() for the same guard.
     normals = vtk.vtkPolyDataNormals()
     normals.SetInputData(surface)
     normals.ConsistencyOn()
     normals.AutoOrientNormalsOn()
+    normals.SplittingOff()
     normals.Update()
     surface = normals.GetOutput()
 
@@ -147,15 +159,18 @@ def remesh_surface(
             progress_cb(pct, msg)
         log.debug("[%3d%%] %s", pct, msg)
 
+    from vortex.pipeline.mesh_quality import _count_boundary_loops
+
     n_before = surface.GetNumberOfCells()
-    _progress(0, f"Preparing surface ({n_before:,} triangles)...")
+    loops_before = _count_boundary_loops(surface)
+    _progress(0, f"Preparing surface ({n_before:,} triangles, {loops_before} opening(s))...")
 
     # 1. Taubin smoothing pass (volume-preserving noise removal).
     if params.remesh_smooth_iterations > 0:
         _progress(20, f"Smoothing surface (Taubin, {params.remesh_smooth_iterations} iter)...")
         surface = _taubin_smooth(surface, iterations=params.remesh_smooth_iterations, pass_band=0.1)
 
-    # 2. Uniform isotropic remeshing via VMTK.
+    # 2. Isotropic remeshing via VMTK.
     if params.remesh_edge_length > 0.0:
         try:
             from vmtk import vmtkscripts
@@ -165,35 +180,213 @@ def remesh_surface(
                 "Make sure vmtk is installed in the vortex-aneurysm env."
             ) from exc
 
-        _progress(45, f"Remeshing to uniform {params.remesh_edge_length} mm edges...")
+        # vmtkSurfaceRemeshing needs pure triangles and merged points — STLs
+        # loaded via `load-mesh` routinely carry unmerged duplicates, which
+        # make the remesher punch holes.  Same pre-VMTK guard as centerlines.
+        _progress(35, "Cleaning input for remesher...")
+        surface = _triangulate_and_clean(surface)
+
         remesher = vmtkscripts.vmtkSurfaceRemeshing()
-        remesher.Surface = surface
-        remesher.ElementSizeMode = "edgelength"
-        remesher.TargetEdgeLength = params.remesh_edge_length
         remesher.PreserveBoundaryEdges = 1   # keep vessel openings as clean loops for capping
+
+        if params.remesh_adaptive:
+            min_edge = params.remesh_min_edge_length
+            max_edge = params.remesh_edge_length
+            if min_edge <= 0.0 or min_edge >= max_edge:
+                raise ValueError(
+                    f"Adaptive remeshing needs 0 < remesh_min_edge_length "
+                    f"({min_edge}) < remesh_edge_length ({max_edge}). "
+                    "Set 'min_edge' below 'edge' via the params command, "
+                    "or turn 'adaptive' off for uniform remeshing."
+                )
+            _progress(40, f"Computing curvature size field ({min_edge}–{max_edge} mm)...")
+            surface = _curvature_size_field(surface, min_edge, max_edge)
+
+            _progress(45, f"Remeshing (adaptive, {min_edge}–{max_edge} mm edges)...")
+            remesher.Surface = surface
+            remesher.ElementSizeMode = "edgelengtharray"
+            remesher.TargetEdgeLengthArrayName = _SIZE_FIELD_ARRAY
+            remesher.TargetEdgeLengthFactor = 1.0
+        else:
+            _progress(45, f"Remeshing to uniform {params.remesh_edge_length} mm edges...")
+            remesher.Surface = surface
+            remesher.ElementSizeMode = "edgelength"
+            remesher.TargetEdgeLength = params.remesh_edge_length
+
         remesher.Execute()
         surface = remesher.Surface
+
+        cleaner = vtk.vtkCleanPolyData()
+        cleaner.SetInputData(surface)
+        cleaner.Update()
+        surface = cleaner.GetOutput()
 
     # 3. Keep the largest region and recompute normals.
     _progress(80, "Cleaning up...")
     surface = _largest_region(surface)
+
+    # SplittingOff is NOT optional here.  VTK defaults to SplittingOn with a
+    # 30 deg feature angle, which duplicates points along every feature edge.
+    # That tears the surface topologically, so vtkFeatureEdges then counts each
+    # seam as an open boundary -> vmtkCapper caps them -> `cap_label` enumerates
+    # dozens of phantom caps (issue #4).  Measured on Test.stl: 3 real openings
+    # became 12 with splitting on, 3 with it off.
     normals = vtk.vtkPolyDataNormals()
     normals.SetInputData(surface)
     normals.ConsistencyOn()
     normals.AutoOrientNormalsOn()
+    normals.SplittingOff()
     normals.Update()
     surface = normals.GetOutput()
 
+    # 4. Post-condition: remeshing must preserve the opening count.  Anything
+    #    else means the surface was torn and capping/CFD downstream will be wrong.
     n_after = surface.GetNumberOfCells()
-    _progress(100, f"Remesh done: {n_before:,} → {n_after:,} triangles")
-    log.info("Remesh: %d → %d triangles (edge=%.3f mm, smooth=%d iter)",
-             n_before, n_after, params.remesh_edge_length, params.remesh_smooth_iterations)
+    loops_after = _count_boundary_loops(surface)
+    if loops_after > loops_before:
+        msg = (f"Remesh changed the opening count ({loops_before} → {loops_after}) — "
+               "the surface was likely torn. Inspect with 'check' before capping.")
+        log.warning(msg)
+        _progress(95, f"WARNING: {msg}")
+
+    _progress(100, f"Remesh done: {n_before:,} → {n_after:,} triangles, "
+                   f"{loops_after} opening(s)")
+    log.info("Remesh: %d → %d triangles, %d → %d openings (edge=%.3f mm, smooth=%d iter)",
+             n_before, n_after, loops_before, loops_after,
+             params.remesh_edge_length, params.remesh_smooth_iterations)
     return surface
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _curvature_size_field(
+    surface: "vtk.vtkPolyData",
+    min_edge: float,
+    max_edge: float,
+) -> "vtk.vtkPolyData":
+    """Attach a per-point target edge length driven by local surface curvature.
+
+    vmtkSurfaceCurvature with BoundedReciprocal+Offset writes
+
+        size = Offset + 1 / (Epsilon + |curvature|)
+
+    which is bounded by [Offset, Offset + 1/Epsilon].  Mapping that onto the
+    caller's millimetre range is therefore exact:
+
+        Offset  = min_edge                    (size as curvature → ∞)
+        Epsilon = 1 / (max_edge - min_edge)   (size as curvature → 0)
+
+    so flat parent vessel gets *max_edge* triangles while the dome, blebs and
+    neck — where curvature is high and CFD accuracy matters — keep *min_edge*
+    ones.  Uniform sizing had to use min_edge everywhere, which is what made
+    the meshes too heavy to solve (issue #3).
+
+    The array is named 'Curvature' because that is the (non-configurable) name
+    vmtkSurfaceCurvature writes; despite the name it now holds edge lengths in mm.
+    """
+    from vmtk import vmtkscripts
+
+    curv = vmtkscripts.vmtkSurfaceCurvature()
+    curv.Surface = surface
+    curv.CurvatureType = "mean"
+    curv.AbsoluteCurvature = 1     # bulges and dents both deserve fine triangles
+    curv.MedianFiltering = 1       # suppress per-triangle curvature noise
+    curv.BoundedReciprocal = 1
+    curv.Epsilon = 1.0 / (max_edge - min_edge)
+    curv.Offset = min_edge
+    curv.Execute()
+    out = curv.Surface
+
+    arr = out.GetPointData().GetArray(_SIZE_FIELD_ARRAY)
+    if arr is None:
+        raise RuntimeError(
+            f"vmtkSurfaceCurvature did not produce a '{_SIZE_FIELD_ARRAY}' array; "
+            "cannot remesh adaptively. Turn 'adaptive' off to use uniform sizing."
+        )
+    sizes = vtk_np.vtk_to_numpy(arr)
+    _blend_size_field_to_boundaries(out, sizes, max_edge)
+    arr.Modified()
+
+    log.info("Curvature size field: min %.3f  p50 %.3f  p99 %.3f  max %.3f mm",
+             float(sizes.min()), float(np.percentile(sizes, 50)),
+             float(np.percentile(sizes, 99)), float(sizes.max()))
+    return out
+
+
+def _blend_size_field_to_boundaries(
+    surface: "vtk.vtkPolyData",
+    sizes: "np.ndarray",
+    max_edge: float,
+) -> None:
+    """Taper *sizes* (in place) toward the existing edge spacing at open rims.
+
+    PreserveBoundaryEdges=1 keeps the input's boundary edges verbatim, so where
+    the rim is finely discretised but the curvature field asks for coarse
+    interior triangles, the remesher bridges the two with slivers.  On Test.stl
+    that produced aspect ratios up to 12 and 4-degree angles right at the
+    openings — the one place the mesh must stay clean, since flow extensions
+    and caps attach there.
+
+    Fix: within a band of 3*max_edge from a rim, blend the target size linearly
+    toward the local boundary edge length, so triangles grow gradually instead
+    of in one step.  Measured effect: max aspect ratio 12.3 -> 4.65, zero
+    triangles above 5, min angle 4.1 -> 7.9 deg, for ~20% more triangles.
+    """
+    from scipy.spatial import cKDTree
+
+    edges = vtk.vtkFeatureEdges()
+    edges.SetInputData(surface)
+    edges.BoundaryEdgesOn()
+    edges.FeatureEdgesOff()
+    edges.ManifoldEdgesOff()
+    edges.NonManifoldEdgesOff()
+    edges.Update()
+    boundary = edges.GetOutput()
+    if boundary.GetNumberOfCells() == 0:
+        return  # closed surface — nothing to taper toward
+
+    # Midpoint and length of every boundary edge.
+    mids, lengths = [], []
+    for i in range(boundary.GetNumberOfCells()):
+        pts = boundary.GetCell(i).GetPoints()
+        if pts.GetNumberOfPoints() != 2:
+            continue
+        a = np.array(pts.GetPoint(0))
+        b = np.array(pts.GetPoint(1))
+        mids.append((a + b) / 2.0)
+        lengths.append(float(np.linalg.norm(a - b)))
+    if not mids:
+        return
+
+    mids = np.asarray(mids)
+    lengths = np.asarray(lengths)
+    tree = cKDTree(mids)
+
+    points = vtk_np.vtk_to_numpy(surface.GetPoints().GetData())
+    band = 3.0 * max_edge
+    dist, idx = tree.query(points, k=min(8, len(mids)))
+    if dist.ndim == 1:                       # k == 1
+        dist, idx = dist[:, None], idx[:, None]
+
+    # Median of the nearest few edges — a single edge length is far too noisy
+    # (p5/p50 on Test.stl differ by 7x).
+    local_edge = np.median(lengths[idx], axis=1)
+    w = np.clip(dist[:, 0] / band, 0.0, 1.0)     # 0 at the rim, 1 beyond the band
+    sizes[:] = np.minimum(sizes, local_edge * (1.0 - w) + sizes * w)
+
+
+def _triangulate_and_clean(poly: "vtk.vtkPolyData") -> "vtk.vtkPolyData":
+    """Force pure triangles and merge duplicate points (pre-VMTK hygiene)."""
+    tri = vtk.vtkTriangleFilter()
+    tri.SetInputData(poly)
+    tri.Update()
+    cleaner = vtk.vtkCleanPolyData()
+    cleaner.SetInputData(tri.GetOutput())
+    cleaner.Update()
+    return cleaner.GetOutput()
+
 
 def _largest_region(poly: "vtk.vtkPolyData") -> "vtk.vtkPolyData":
     conn = vtk.vtkPolyDataConnectivityFilter()
