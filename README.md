@@ -3,13 +3,15 @@
 **Cerebral aneurysm 3D model pipeline — DICOM → STL for CFD/FSI/3D printing**
 
 VORTEX (Vascular Output & Real-time Thresholding EXtraction) is a tool for processing angio-CT or angio-MR DICOM images into high-quality STL meshes. It is designed to produce watertight models ready for OpenFOAM rigid-wall CFD, FSI simulations, or 3D printing.
-It is designed to be used in GNU/Linux systems. It has not been tested in MacOS/Windows.
+It is designed to be used in GNU/Linux systems. Windows 11 users can run it via WSL2 (see [Windows 11 Installation](#windows-11-installation-via-wsl2) below).
 
 ---
 
 ## Installation
 
-### 1. Install Miniforge3 (Required)
+### Linux
+
+#### 1. Install Miniforge3 (Required)
 The `vmtk` library is only available via conda-forge for modern Python versions.
 
 ```bash
@@ -18,11 +20,65 @@ bash Miniforge3.sh
 source ~/.bashrc
 ```
 
-### 2. Run Setup
+#### 2. Run Setup
 ```bash
 bash setup.sh
 ```
 This script creates the `vortex-aneurysm` conda environment and installs all dependencies (vmtk, SimpleITK, etc.).
+
+---
+
+### Windows 11 Installation (via WSL2)
+
+VORTEX does not run natively on Windows. Windows 11 users should use **WSL2** (Windows Subsystem for Linux), which provides a full Linux environment including GUI support (WSLg is built into Windows 11 — no extra installation needed).
+
+#### 1. Enable WSL2
+
+Open **PowerShell as Administrator** and run:
+
+```powershell
+wsl --install
+```
+
+This installs Ubuntu by default. Restart your machine when prompted.
+
+#### 2. Open Ubuntu
+
+Launch **Ubuntu** from the Start Menu. You now have a Linux terminal.
+
+#### 3. Install Miniforge3
+
+Inside the Ubuntu terminal:
+
+```bash
+curl -L https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -o Miniforge3.sh
+bash Miniforge3.sh
+source ~/.bashrc
+```
+
+#### 4. Clone VORTEX into the WSL2 filesystem
+
+Store the project inside WSL2 (not on the Windows drive) for best performance:
+
+```bash
+cd ~
+git clone <repository-url>
+cd VORTEX
+```
+
+#### 5. Run Setup
+
+```bash
+bash setup.sh
+```
+
+#### 6. Launch
+
+```bash
+./run-cli.sh shell
+```
+
+**Accessing Windows files from WSL2:** Your Windows drives are mounted at `/mnt/c/`, `/mnt/d/`, etc. For example, DICOM data at `C:\Users\Name\DICOMs` is accessible as `/mnt/c/Users/Name/DICOMs` inside VORTEX.
 
 ---
 
