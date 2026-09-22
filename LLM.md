@@ -1,6 +1,6 @@
 # VORTEX Aneurysm — Implementation State & Pivot Summary
 
-_Last updated: August 5, 2026_
+_Last updated: September 22, 2026_
 
 ---
 
@@ -258,40 +258,68 @@ Configured `vmtkCapper` to output `CellEntityIds`:
 
 ## 🧭 NEXT STEPS
 
-### Pending: validation required to accept the `remesh` PR
+### `remesh` milestone: merged, with one gate remaining
 
-Branch `feature/remesh-conclusion` → PR into `in_developement`. The code for
-milestone **"Conclude remesh functionality"** (issues #3, #4, #5) is complete and
-verified on the synthetic `Test.stl`, but **the PR must not be merged until a real
-patient case has been validated end-to-end through vortex-cfd** (issue #5 is the
-milestone's definition of done).
+PR #9 merged to `in_developement` (2026-09-22, merge commit `77f0fef`). Issues #3
+(adaptive sizing) and #4 (`SplittingOn` tearing) are closed. `feature/remesh-conclusion`
+has been deleted — **`in_developement` is the single active development branch.**
 
-**Acceptance criteria — all must pass on one real case before merging:**
+The merge gate was **narrowed to the VORTEX side** before merging, and issue #5 was
+subsequently rewritten. Both changes came out of measurements taken on 2026-09-22.
+The reasoning matters more than the outcome, so it is recorded below.
 
-1. **VORTEX side.** Run the full pipeline with the new defaults
-   (`remesh_adaptive=True`, `edge=0.5`, `min_edge=0.2`), then `check`:
-   - boundary loop count equals the real number of vessel openings, with **no
-     loops flagged as suspected tears**;
-   - **0 non-manifold edges**;
-   - max aspect ratio **< 5** and min triangle angle **> 10°**;
-   - `cap_label` offers **exactly** the real openings — no phantom-cap warning.
-2. **Mesh generation.** `snappyHexMesh` completes and OpenFOAM **`checkMesh`
-   passes its skewness gate** — this is the gate that failed on AA_011 and opened
-   the milestone.
-3. **Solve.** The case **runs to completion without the GAMG pressure-solver
-   crash** (vortex-cfd BUG-013), and **WSS values are physiologically plausible**.
-4. **Cell count is tractable** — materially below what uniform `edge=0.25`
-   produced (~157k surface triangles on a small dome).
+#### ⚠️ The surface-roughness premise for this milestone was disproved
 
-**Preferred case:** AA_011, the MRI-derived case whose failure opened the
-milestone — re-validating it closes the loop directly. A CT/angio case that
-already worked is worth a second run to confirm no regression.
+The milestone was opened on the theory that rough surfaces caused AA_011's CFD
+failure (vortex-cfd BUG-013), and that remeshing would fix it. **That theory does
+not hold, and future work should not assume it.**
 
-Record the outcome in the PR before merging. If validation fails, the likely knobs
-are `edge` (raise to lighten the mesh) and `min_edge` (lower to resolve the dome),
-in that order — see README "Tuning the `remesh` parameters".
+- **Several cases have been run end-to-end through vortex-cfd with no remeshing at
+  all and completed successfully — five results being prepared for publication.**
+  Those surfaces were in the same AR-400+ class as raw AA_002. If roughness caused
+  GAMG to go singular, they should have failed too.
+- The original criterion 2 (`checkMesh` skewness gate) was **already stale** when
+  written: vortex-cfd BUG-009 established AA_011's June abort as a *false* abort —
+  the gate sat at skewness 4, OpenFOAM's *internal*-face target, not a fatal limit.
+  AA_011 had 29 skewed faces / 3.12 M (0.0009 %), max 6.66, non-ortho 69.96, zero
+  negative volumes. The gate was raised 4 → 20 in June, so that criterion would now
+  pass regardless of anything this milestone did.
 
----
+AA_011's failure remains **unexplained by triangle quality**. That investigation now
+lives independently in `Supperpt/vortex-cfd#5` (BUG-013), not in this milestone.
+
+#### What remeshing actually does (measured, AA_002)
+
+Aspect ratio here is circumradius / 2·inradius (equilateral = 1); this is **not** the
+metric `check` reports, so compare only within this table.
+
+| | wall region | extensions / caps |
+|---|---|---|
+| raw → `extend` (no remesh) | n=6,905, max **426.57**, 32 above AR 5 | n=9,885, max **52.19**, 90 above AR 5 |
+| `remesh` → `extend` | n=8,299, max **1.89**, **0** above AR 5 | n=9,811, max **52.18**, 88 above AR 5 |
+
+So `remesh` **completely fixes the vessel wall** and has **no effect on extension/cap
+slivers** — those are created by `extend` and are present either way. In a
+non-remeshed run they are invisible in the reported global max because the wall's
+AR-426 triangles dominate it. Spatial confirmation: of 101 triangles above AR 5 in
+the remeshed+extended surface, **101 of 101 lie outside the original lumen bounding
+box**. Tracked as #11 (low priority — all five successful CFD runs carried them).
+
+#### Measure the exported surface, not the lumen
+
+`check` after `remesh` reports the **open lumen**; snappyHexMesh consumes the
+**capped, extended** surface. On AA_002 the lumen is AR max 2.00 / min angle 26.8°
+while the exported surface is AR max 11.75 / 5.6°. The original criterion 1 measured
+the wrong one. Any future quality gate must run on the export.
+
+#### Remaining gate — issue #5, rewritten
+
+Now a **regression check**: does remeshing break a case that already works? Take one
+of the five known-good cases, re-run it with `remesh` inserted, and confirm it still
+completes — comparing WSS/TAWSS/OSI against its own non-remeshed run (same patient,
+same BCs, one variable). No remeshed surface has ever been through OpenFOAM, and the
+README now *recommends* `remesh`, so this gap is worth closing before it surfaces on
+a patient case mid-study.
 
 ## ⚠️ Known Issues for Future LLMs
 
@@ -299,3 +327,4 @@ in that order — see README "Tuning the `remesh` parameters".
 2. **VMTK Availability**: VMTK is *only* reliable via the `vmtk` conda channel. Do not attempt to fix PyPI `vmtk` installs for Python 3.9+.
 3. **Coordinate Systems**: DICOM (LPS) vs. VTK (XYZ) vs. SimpleITK (IJK). Coordinate conversions are handled in `dicom_loader.py` and `vtk_compat.py`. Always verify directions if orientation seems flipped.
 4. **Flow extensions mesh quality**: `vmtkFlowExtensions` is sensitive to mesh cleanliness at vessel openings. Signs of bad input: Jacobi eigenvector warnings, point count explosion. Ensure the mesh has clean manifold geometry and well-formed closed boundary loops before calling `extend`. Running `mesh` with default smoothing (no `--reduce-mesh`) usually produces a clean enough input.
+5. **`AdaptiveNumberOfBoundaryPoints` means the opposite of what it looks like** (fixed 2026-09-22, commit `f268a2b`, issue #10). Set to `0`, `vmtkFlowExtensions` pins `TargetNumberOfBoundaryPoints` (default **50**) on *every* extension ring regardless of the opening's size — so the smaller the vessel, the finer the extension. AA_002's 2.32 mm outlet got 50 points = 0.046 mm spacing against a 0.2 mm remesh target, inflating the exported surface ~2× (39,364 → 18,110 triangles once fixed; `Test.stl` 30,036 → 24,036). Set to `1` it derives each ring from the rim it attaches to. The old code comment claimed `0` avoided subdividing the extension cylinder; it does the opposite. **This was a triangle-count issue only** — extension slivers are unchanged either way (#11), and it is unrelated to BUG-013.
