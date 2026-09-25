@@ -922,11 +922,20 @@ def do_shell():
                                      ("--sphere", "cut_sphere_factor")):
                     if _flag in _tok:
                         try:
-                            setattr(ip, _attr, float(_tok[_tok.index(_flag) + 1]))
+                            _new = float(_tok[_tok.index(_flag) + 1])
                         except (IndexError, ValueError):
                             console.print(f"[red]Usage: isolate [{_flag} N][/red]")
                             _bad = True
                             break
+                        # Centerlines are computed on the scaffold, so a different
+                        # scaffold invalidates them. --diameters and --sphere only
+                        # affect what happens after, so their cache stays valid.
+                        if _attr == "scaffold_mm":
+                            if _new != ip.scaffold_mm:
+                                session.isolation_centerlines = None
+                            # Naming a size means using it, not capping it.
+                            ip.scaffold_auto = False
+                        setattr(ip, _attr, _new)
                 if _bad:
                     continue
 
@@ -980,7 +989,9 @@ def do_shell():
                 table.add_row("Parent vessel diameter", f"{result['parent_diameter_mm']:.2f} mm")
                 table.add_row("Trim distance",
                               f"{result['threshold_mm']:.1f} mm  ({ip.n_diameters:g} diameters)")
-                table.add_row("Working region", f"{result['scaffold_mm']:.0f} mm")
+                table.add_row("Working region",
+                              f"{result['scaffold_mm']:.0f} mm"
+                              + ("  (auto)" if ip.scaffold_auto else "  (fixed)"))
                 table.add_row("Triangles", f"{_st['cells_before']:,} → {_st['cells_after']:,}")
                 table.add_row("Bounding box diagonal",
                               f"{_st['bbox_before']:.1f} → {_st['bbox_after']:.1f} mm")
@@ -1024,7 +1035,9 @@ def do_shell():
                 table.add_row("n_diameters", f"{ip.n_diameters:g}",
                               "parent diameters of vessel kept past the neck")
                 table.add_row("scaffold_mm", f"{ip.scaffold_mm:g}",
-                              "working region around the seed; auto-expands if too small")
+                              "upper bound on the working region around the seed")
+                table.add_row("scaffold_auto", str(ip.scaffold_auto),
+                              "size the region from the data (False pins scaffold_mm)")
                 table.add_row("scaffold_inset_mm", f"{ip.scaffold_inset_mm:g}",
                               "inset that turns sealed vessel ends into open holes")
                 table.add_row("cut_sphere_factor", f"{ip.cut_sphere_factor:g}",
@@ -1040,12 +1053,13 @@ def do_shell():
                               "'params' is a segmentation setting and is unrelated.[/dim]")
                 if Confirm.ask("Edit a parameter?"):
                     key = Prompt.ask("Parameter name",
-                                     choices=["diameters", "scaffold", "inset",
+                                     choices=["diameters", "scaffold", "auto", "inset",
                                               "sphere", "tear", "decimate", "retract"])
                     val = Prompt.ask("New value")
                     try:
                         if key == "diameters": ip.n_diameters = float(val)
                         if key == "scaffold":  ip.scaffold_mm = float(val)
+                        if key == "auto":      ip.scaffold_auto = (val.lower() == "true")
                         if key == "inset":     ip.scaffold_inset_mm = float(val)
                         if key == "sphere":    ip.cut_sphere_factor = float(val)
                         if key == "tear":      ip.tear_radius_mm = float(val)

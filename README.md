@@ -121,10 +121,20 @@ own centerline. That replaces the manual sectioning step for most cases:
 ```
 isolate                  ← trim to the aneurysm + 5 vessel diameters (default)
 isolate --diameters 3    ← keep less vessel
-isolate --scaffold 25    ← widen the working region if a branch is cut short
+isolate --scaffold 15    ← pin the working region by hand instead of auto-sizing
 isolate --undo           ← put the previous surface back
 check                    ← confirm one region, and one opening per cut
 ```
+
+`isolate` sizes its own working region around the seed, growing it only while
+the surface inside still looks like vessel. That matters near the skull base:
+on the two anterior communicating artery cases tested, going from a 12 mm to a
+15 mm region pulled in bone, quadrupled the triangle count and made the vessel
+measure 9 mm instead of 2 mm. Since the measured diameter sets the trim
+distance, one bad measurement corrupts everything after it. The reported
+diameter is the number to sanity-check: a cerebral artery should read roughly
+2-4 mm. If it does not, the region has taken in bone, and `--scaffold` with a
+smaller value is the fix.
 
 Settings live in `isolate-params`, separate from `params`. Note `roi_radius` in
 `params` is a *segmentation* setting and has nothing to do with the region

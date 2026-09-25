@@ -67,6 +67,12 @@ _MERGE_TOL     = 1e-4     # mm — coordinate rounding when merging centerline p
 # against 0.93 mm for a real cerebral artery.
 _MAX_VESSEL_DIAMETER_MM = 12.0
 
+# Growing the working region by a quarter can at most roughly double the
+# triangles of a tube. A steeper jump than this means non-vessel material
+# (typically skull base bone) has entered the box. Measured: 29,620 -> 109,534
+# triangles going 12 -> 15 mm on an anterior communicating artery case.
+_BONE_JUMP = 2.2
+
 
 # ---------------------------------------------------------------------------
 # Containers
@@ -448,10 +454,13 @@ def _check_vessel_like(diameter_mm: float) -> None:
     if diameter_mm > _MAX_VESSEL_DIAMETER_MM:
         raise RuntimeError(
             f"Measured local vessel diameter is {diameter_mm:.1f} mm, which is "
-            f"not vessel-like (a cerebral artery is roughly 2-4 mm). The mesh "
-            f"most likely contains skull or soft tissue rather than lumen.\n"
-            f"Re-run 'segment' with a tighter roi_radius or a higher HU "
-            f"threshold, or clean the mesh externally first."
+            f"not vessel-like (a cerebral artery is roughly 2-4 mm). The "
+            f"centerline is running through bone or soft tissue rather than "
+            f"lumen.\n"
+            f"Most often the working region is too large and has taken in bone: "
+            f"try a smaller one, e.g. 'isolate --scaffold 12'. Otherwise re-run "
+            f"'segment' with a tighter roi_radius or a higher HU threshold, or "
+            f"clean the mesh externally first."
         )
 
 
@@ -648,30 +657,53 @@ def isolate_aneurysm_region(surface, seed_mm, iso_params=None,
     cells_before = surface.GetNumberOfCells()
     openings_before = len(_detect_boundary_profiles(surface))
 
-    scaffold = float(iso.scaffold_mm)
-    result = _isolate_once(surface, seed_mm, iso, scaffold, centerlines, _prog)
+    if getattr(iso, "scaffold_auto", True) and centerlines is None:
+        scaffold = choose_scaffold(surface, seed_mm, float(iso.scaffold_mm),
+                                   iso.scaffold_inset_mm, _prog)
+        if scaffold < float(iso.scaffold_mm):
+            log.info("Working region auto-set to %.0f mm (cap %.0f mm).",
+                     scaffold, iso.scaffold_mm)
+    else:
+        scaffold = float(iso.scaffold_mm)
 
-    # Truncation self-check: a cut sitting on the scaffold boundary means the
-    # scaffold was too small to reach N diameters, so the trim length is being
-    # set by the box rather than by the anatomy. Retry once, wider.
-    if result["truncated"] and centerlines is None:
-        # Cap the expansion. Without a ceiling, a mis-measured diameter (a seed
-        # that landed on bone, say) produces a huge threshold and the retry
-        # would blow the working region up to the whole scan, which is slow and
-        # defeats the point of isolating.
-        wider = min(max(1.5 * scaffold, result["threshold_mm"] * 1.3), 2.0 * scaffold)
-        log.warning("Cuts reached the %.1f mm scaffold boundary — the trim was "
-                    "being limited by the box, not the vessel. Retrying at "
-                    "%.1f mm.", scaffold, wider)
-        _prog(50, f"Scaffold too small — retrying at {wider:.0f} mm...")
-        result = _isolate_once(surface, seed_mm, iso, wider, None, _prog)
-        scaffold = wider
-        if result["truncated"]:
-            log.warning(
-                "Cuts still reach the scaffold boundary at %.1f mm. The vessel "
-                "may leave the segmented volume before %.1f mm; the trim is "
-                "shorter than %.1f diameters on at least one branch.",
-                wider, result["threshold_mm"], iso.n_diameters)
+    # If centerlines fail at the chosen size, step down rather than give up:
+    # a slightly smaller region often still has two clean openings.
+    _tried = []
+    while True:
+        try:
+            result = _isolate_once(surface, seed_mm, iso, scaffold, centerlines, _prog)
+            break
+        except RuntimeError as exc:
+            _tried.append(scaffold)
+            smaller = scaffold - 2.0
+            if centerlines is not None or smaller < 6.0 or not getattr(iso, "scaffold_auto", True):
+                raise
+            log.warning("Isolation failed at a %.0f mm working region (%s). "
+                        "Retrying at %.0f mm.", scaffold, exc, smaller)
+            scaffold = smaller
+
+    # The working region is NOT widened automatically when a branch is cut
+    # short, even though that is the obvious thing to try. Widening drags in
+    # the bone and soft tissue that surround the vessel, and the diameter is
+    # measured from the centerline running through whatever is in the region.
+    # Measured on AA_001: at a 15 mm region the centerline is a clean artery
+    # (anchor radius 0.85 mm, diameter 1.62 mm, matching an independent 1.78 mm
+    # measurement). At 30 mm the anchor sits in bone, the median radius goes
+    # from 0.83 to 3.67 mm, and the vessel "measures" 19.24 mm. The region also
+    # grew from 31k to 458k triangles. So growing the region to win a longer
+    # trim destroys the measurement that sets the trim.
+    #
+    # Truncation is therefore reported, not fixed. Raising it is the user's
+    # call, because only they can tell a vessel that leaves the scan from one
+    # that is merely outside the current region.
+    if result["truncated"]:
+        log.warning(
+            "At least one branch reaches the %.0f mm working region before the "
+            "full %.1f mm trim, so the region is setting its length rather than "
+            "the anatomy. Raise it with 'isolate --scaffold %.0f' if the vessel "
+            "continues in the scan — but check the reported diameter stays "
+            "vessel-like, since a larger region can take in bone.",
+            scaffold, result["threshold_mm"], min(scaffold * 1.5, scaffold + 10))
 
     out = result["surface"]
     cells_after = out.GetNumberOfCells()
@@ -709,6 +741,49 @@ def isolate_aneurysm_region(surface, seed_mm, iso_params=None,
             "truncated":       result["truncated"],
         },
     }
+
+
+def choose_scaffold(surface, seed_mm, max_mm, inset_mm, prog=None):
+    """Pick the largest working region that still contains only vessel.
+
+    A fixed region cannot work. Too small and the trim is cut short; too large
+    and it swallows nearby bone, whereupon the centerline routes through the
+    bone and the "vessel diameter" becomes meaningless -- which then sets the
+    trim distance, so one bad measurement corrupts everything downstream.
+
+    Bone entering the box announces itself by a jump in triangle count far
+    steeper than the box is growing. Measured on two anterior communicating
+    artery cases, where the skull base is millimetres away:
+
+        AA_003   8mm 23028   10mm 26463   12mm 29620   15mm 109534 tris
+                 diameter    2.33  2.29    2.25  ->  8.93 mm at 15mm
+        AA_009   8mm 10648   10mm 13253                15mm 119798 tris
+                 diameter    1.01  0.96                9.84 mm at 15mm
+
+    Growing the box by a quarter can at most about double the triangles of a
+    tube-like structure, so a jump past _BONE_JUMP means something that is not
+    vessel came in. This is a clip-only test, so it costs no centerline runs.
+    """
+    sizes = [s for s in (8.0, 10.0, 12.0, 15.0, 20.0, 25.0) if s <= max_mm + 1e-9]
+    if not sizes:
+        sizes = [max_mm]
+
+    chosen, prev_cells, prev_size = sizes[0], None, None
+    for s in sizes:
+        if prog:
+            prog(3, f"Sizing the working region ({s:.0f} mm)...")
+        cells = scaffold_clip(surface, seed_mm, s, inset_mm).GetNumberOfCells()
+        if cells == 0:
+            continue
+        if prev_cells and cells > _BONE_JUMP * prev_cells:
+            log.info("Working region stops at %.0f mm: going to %.0f mm would "
+                     "take the surface from %d to %d triangles, too steep for "
+                     "vessel alone, so something else is entering the box.",
+                     prev_size, s, prev_cells, cells)
+            chosen = prev_size
+            break
+        chosen, prev_cells, prev_size = s, cells, s
+    return float(chosen)
 
 
 def _isolate_once(surface, seed_mm, iso, scaffold_mm, centerlines, prog):
