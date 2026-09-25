@@ -158,14 +158,18 @@ def next_commands(session) -> list:
         ordered.append("view")
     # Reasonable follow-ons from the current state.
     if _has_surface(session):
-        for c in ("check", "remesh", "centerlines", "extend", "clip-sac", "cap_label", "export", "metrics"):
+        # "isolate" sits ahead of centerlines: it trims the tree and creates
+        # the openings centerlines then needs. Deliberately not in
+        # current_step()/_completed_steps -- it is optional, like "check", and
+        # listing it there would make every DICOM run look incomplete.
+        for c in ("check", "isolate", "remesh", "centerlines", "extend", "clip-sac", "cap_label", "export", "metrics"):
             if c not in ordered:
                 ordered.append(c)
     if not _has_surface(session):
         for c in ("load", "load-mesh", "list", "seed", "set-seed", "sample-hu", "segment", "mesh"):
             if c not in ordered:
                 ordered.append(c)
-    for c in ("status", "params", "reset", "help", "exit"):
+    for c in ("status", "params", "isolate-params", "reset", "help", "exit"):
         if c not in ordered:
             ordered.append(c)
     return ordered

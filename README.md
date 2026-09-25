@@ -112,14 +112,37 @@ mesh                    ← Marching Cubes + smoothing → surface mesh
 export raw_vessel.stl   ← save for external editing
 ```
 
-### Phase 2 — External Editing (MeshLab / Meshmixer / 3D Slicer)
+### Phase 2 — Sectioning the vessel
 
-Open `raw_vessel.stl` in your preferred tool and:
+**Try `isolate` first.** It uses the seed to trim the mesh down to the aneurysm
+plus a set length of every vessel attached to it, cutting each one square to its
+own centerline. That replaces the manual sectioning step for most cases:
+
+```
+isolate                  ← trim to the aneurysm + 5 vessel diameters (default)
+isolate --diameters 3    ← keep less vessel
+isolate --scaffold 25    ← widen the working region if a branch is cut short
+isolate --undo           ← put the previous surface back
+check                    ← confirm one region, and one opening per cut
+```
+
+Settings live in `isolate-params`, separate from `params`. Note `roi_radius` in
+`params` is a *segmentation* setting and has nothing to do with the region
+`isolate` works in.
+
+**What `isolate` cannot do: remove bone that is fused to the vessel.** It trims
+the vascular tree; where bone touches the lumen the two are one connected
+surface and no amount of geometry separates them. It warns when it detects
+this. Those cases still need external editing, and so do unusual geometries
+where the automatic cut lands badly.
+
+**External editing (MeshLab / Meshmixer / 3D Slicer)** — the fallback. Open
+`raw_vessel.stl` and:
 - Remove bone and non-vascular structures
 - Section the vessel at clean, planar cut planes
 - Fix any mesh defects (non-manifold edges, holes)
 
-Save the result (e.g. `edited_vessel.stl`).
+Save the result (e.g. `edited_vessel.stl`) and carry on with `load-mesh`.
 
 ### Phase 3 — CFD Preparation (back in VORTEX)
 
@@ -288,7 +311,8 @@ load "/path/to/dicom"
 seed
 segment
 mesh
-centerlines
+isolate                 ← trim to the aneurysm + 5 vessel diameters of parent vessel
+centerlines             ← must run AFTER isolate (isolate creates new openings)
 extend
 export aneurysm.stl
 ```
@@ -308,6 +332,8 @@ export aneurysm.stl
 | `params` | View and edit pipeline parameters (HU thresholds, `roi_radius`, `use_levelset`, `split_patches`, etc.). |
 | `segment` | Segment the DICOM volume using thresholds and the selected seed. |
 | `mesh` | Generate the 3D surface mesh from the segmentation. |
+| `isolate [--diameters N] [--scaffold MM] [--sphere K] [--undo]` | Trim the mesh to the aneurysm plus N parent-vessel diameters of every attached vessel, cutting each one perpendicular to its own centerline. Replaces manual sectioning in MeshLab/Meshmixer for most cases. Run after `mesh`/`load-mesh`. **`centerlines` must be re-run afterwards** — `isolate` creates new openings, and any centerlines computed before it are discarded. Does not remove bone fused to the vessel; it warns instead. Settings live in `isolate-params`. |
+| `isolate-params` | Show and edit the isolation settings. Kept separate from `params`, which stays a segmentation/meshing table. |
 | `remesh` | Taubin-smooth + curvature-adaptively remesh the surface (vmtkSurfaceRemeshing) for CFD-grade triangle quality — fine triangles on the dome, coarse on flat vessel. Run on the lumen surface **before `centerlines`/`extend`**. Tunable via `remesh_edge_length` / `remesh_min_edge_length` / `remesh_adaptive` / `remesh_smooth_iterations` in `params` — see "Tuning the `remesh` parameters" above. |
 | `centerlines` | Compute vessel centerlines. |
 | `extend` | Add flow extensions and cap the model. Must run before `clip-sac`. |

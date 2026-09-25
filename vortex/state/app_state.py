@@ -78,6 +78,52 @@ class PipelineParams:
 
 
 @dataclass
+class IsolateParams:
+    """Parameters for the `isolate` command only.
+
+    Deliberately kept out of PipelineParams. Nothing in the segmentation,
+    meshing or export path reads these, so PipelineParams.copy() -- which
+    lists every field by hand and sits on the path to every worker -- does
+    not need to change, and the existing pipeline cannot regress from a
+    change it never sees. It also keeps the `params` table readable; it is
+    already 18 rows and these belong to a different question.
+
+    Note `roi_radius` on PipelineParams is a *segmentation* setting and has
+    nothing to do with `scaffold_mm` here. They are separate on purpose.
+    """
+
+    # Trim length
+    n_diameters:       float = 5.0   # parent diameters of vessel kept past the neck
+
+    # Scaffold: the working region that makes centerlines possible.
+    # NOT the final trim -- the perpendicular cuts at n_diameters decide that.
+    # 15 mm rather than 10 because the measured requirement across AA_001/002/
+    # 003/009 is 7.6-12.7 mm from the neck, so 10 truncates every one of them.
+    scaffold_mm:       float = 15.0  # working region around the seed; auto-expands
+    scaffold_inset_mm: float = 0.6   # inset that turns sealed ends into clean openings
+
+    # Cut geometry
+    cut_sphere_factor: float = 2.5   # cut localisation radius, in measured cross-section radii
+
+    # Cleanup and fallbacks
+    tear_radius_mm:    float = 1.0   # openings below this are filled as tears
+    decimate_target:   float = 0.7   # decimation before the network fallback only
+    anchor_retract:    bool  = True  # walk off a sac-intruding branch, network engine only
+
+    def copy(self) -> "IsolateParams":
+        """Return a copy — safe to hand to a worker without sharing refs."""
+        return IsolateParams(
+            n_diameters=self.n_diameters,
+            scaffold_mm=self.scaffold_mm,
+            scaffold_inset_mm=self.scaffold_inset_mm,
+            cut_sphere_factor=self.cut_sphere_factor,
+            tear_radius_mm=self.tear_radius_mm,
+            decimate_target=self.decimate_target,
+            anchor_retract=self.anchor_retract,
+        )
+
+
+@dataclass
 class AppState:
     """Single source of truth for all live pipeline data.
 
