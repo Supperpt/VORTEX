@@ -1,6 +1,6 @@
 # VORTEX Aneurysm — Implementation State & Pivot Summary
 
-_Last updated: September 22, 2026_
+_Last updated: September 25, 2026_
 
 ---
 
@@ -320,6 +320,107 @@ completes — comparing WSS/TAWSS/OSI against its own non-remeshed run (same pat
 same BCs, one variable). No remeshed surface has ever been through OpenFOAM, and the
 README now *recommends* `remesh`, so this gap is worth closing before it surfaces on
 a patient case mid-study.
+
+---
+
+## 🚧 `isolate` (issue #7) — IMPLEMENTED BUT NOT VALIDATED
+
+**Branch `feature_isolation`. Do not open a PR. The function has never been run
+end-to-end by a human, and its output has never been looked at.** Session of
+2026-09-25.
+
+### What it is
+
+A new `isolate` command that trims a segmented tree to the aneurysm plus N parent
+diameters of every attached vessel, replacing the manual sectioning step in
+MeshLab/Meshmixer. Order is `load → seed → segment → mesh → isolate → export`, and
+for CFD `isolate → remesh → centerlines → extend → clip-sac → export`.
+
+New module `vortex/pipeline/vessel_isolation.py`; settings in a separate
+`IsolateParams` and an `isolate-params` command, deliberately **not** in
+`PipelineParams` so its hand-written `copy()` stays untouched.
+
+### Three findings that shaped it (independent of each other)
+
+1. **Vessel ends come out of `segment`/`mesh` sealed, not open**, intermittently,
+   depending on how the ROI crop meets each vessel. Reported by the repo owner.
+   The mechanism inside segmentation is **still undetermined** — morphological
+   closing was tested and ruled out. `isolate` sidesteps it by cutting its own
+   openings with an inset box clip: AA_001 goes from 1 usable opening to 4.
+
+2. **A fixed working region cannot work, and this is the important one.** Too small
+   truncates the trim; too large takes in bone, the centerline routes through the
+   bone rather than the artery, and the measured "vessel diameter" becomes
+   meaningless — which then *sets the trim distance*, so one bad measurement
+   corrupts everything downstream. Measured on AA_003 and AA_009, both **anterior
+   communicating artery** aneurysms where the skull base is millimetres away:
+
+   | Region | AA_003 tris | AA_003 Ø | AA_009 tris | AA_009 Ø |
+   |---|---|---|---|---|
+   | 8 mm  | 23,028 | 2.33 mm | 10,648 | 1.01 mm |
+   | 10 mm | 26,463 | 2.29 mm | 13,253 | 0.96 mm |
+   | 12 mm | 29,620 | 2.25 mm | — (centerlines fail) | — |
+   | 15 mm | 109,534 | **8.93 mm** | 119,798 | **9.84 mm** |
+
+   Bone arrives as a discontinuity, not a drift. `choose_scaffold()` grows the box
+   only while the triangle count grows sub-`_BONE_JUMP` (2.2×), which is a clip-only
+   test costing no centerline runs. **An earlier version auto-*widened* the region
+   when a branch was cut short. That was exactly backwards** — on AA_001, 15→30 mm
+   took the anchor radius 0.85 → 8.55 mm and the diameter 1.62 → 19.24 mm. Removed.
+   Truncation is now reported, never auto-fixed.
+
+3. **`compute_centerlines` could return empty geometry with no error** (fixed,
+   commit `11b2f55`). The `SourceIds`/`TargetIds` handed to VMTK's `profileidlist`
+   selector index *our* radius-sorted profile list, not VMTK's internal cap
+   numbering. On surfaces with many loops they disagree, VMTK fails internally with
+   `Seed id exceeds input number of points!`, and returns nothing. Now retries with
+   the `pointlist` selector using profile centres in mm. **The retry runs only where
+   the old code already produced nothing, so it cannot change a working case** —
+   verified byte-identical on `Test.stl` and `AA_direito.stl`.
+
+### The sphere trap (worth knowing before touching `apply_cuts`)
+
+A plane is infinite, so a cut on one daughter of a bifurcation would also slice the
+other daughter or the dome. Each cut is confined to a sphere. **That sphere must
+fully clear the vessel cross-section**: while it cuts through the rim, the opening
+follows the sphere instead of the plane, and the error *grows* with radius until the
+sphere finally clears — 0.48 mm deviation at 3× MISR, 0.78 at 4×, 1.08 at 5×, then
+exactly 0.00. MISR is the *inscribed* radius and understates an oblique cross-section
+(1.24 mm vs an actual 3.34 mm rim). The sphere is therefore sized from the measured
+cross-section, after which rim planarity is exact and insensitive to the parameter.
+
+### Current measured state (module API, four cases, real dome seeds)
+
+| Case | Region (auto) | Engine | Cuts | Ø | Trim | Kept | Rim planarity |
+|---|---|---|---|---|---|---|---|
+| AA_001 | 15 mm | profiles | 2 | 1.62 mm | 8.1 mm | 2.8% | 0.0000 mm |
+| AA_002 | 12 mm | profiles | 1 | 2.81 mm | 14.0 mm | 7.1% | n/a |
+| AA_003 | 12 mm | profiles | 2 | 2.25 mm | 11.3 mm | 5.5% | 0.0000 mm |
+| AA_009 | 10 mm | network  | 3 | 1.17 mm | 5.8 mm | 1.5% | 0.0000 mm |
+
+### ⛔ What has NOT been tested — do this before any PR
+
+1. **The `isolate` shell command itself has never been run.** All results above come
+   from calling `isolate_aneurysm_region()` directly. The CLI block, flag parsing,
+   `--undo`, the report table and `isolate-params` are **unexercised**.
+2. **No output has been looked at.** Open all four in MeshLab before trusting cut
+   placement, especially AA_009, which kept only 1.5% of the mesh.
+3. **The downstream chain has never been run after `isolate`** —
+   `centerlines → extend → clip-sac → export` is untested on an isolated surface.
+4. **Bifurcation non-regression**, the explicit requirement in issue #7, is unverified.
+5. **AA_002 is unresolved**: it wants a 14.0 mm trim but auto-sized to a 12 mm region,
+   so it warns about truncation and produces 1 cut instead of 2. Its diameter also
+   moves with region size (2.81 mm at 12 mm, 1.57 mm at 15 mm; the owner's own ROI-10
+   measurement was 2.53 mm). A measurement that mobile is not settled.
+6. **AA_009 fell back to the slow seedless skeletoniser**, because at 10 mm only one
+   opening survived.
+
+### The sanity check to teach users
+
+**The reported parent diameter is the check.** A cerebral artery should read roughly
+2–4 mm. If it does not, the working region took in bone and the trim distance derived
+from it is wrong. `isolate` cannot separate bone that is genuinely *fused* to the
+lumen; it only avoids *including* nearby bone in the box.
 
 ## ⚠️ Known Issues for Future LLMs
 
