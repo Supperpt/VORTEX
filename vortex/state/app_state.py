@@ -114,7 +114,10 @@ class IsolateParams:
     cut_sphere_factor: float = 2.5   # cut localisation radius, in measured cross-section radii
 
     # Cleanup and fallbacks
-    tear_radius_mm:    float = 1.0   # openings below this are filled as tears
+    # 1.0 filled real vessel openings of 0.6-1.1 mm radius (AA_009's A1s), so
+    # those vessels got no centerline and were never cut. Slivers from the
+    # scaffold inset measure under 0.45 mm.
+    tear_radius_mm:    float = 0.3   # openings below this are filled as tears
     decimate_target:   float = 0.7   # decimation before the network fallback only
     anchor_retract:    bool  = True  # walk off a sac-intruding branch, network engine only
 

@@ -1055,7 +1055,9 @@ def do_shell():
                     console.print(
                         f"[dim]  cut {i}: at ({c.origin[0]:.1f}, {c.origin[1]:.1f}, "
                         f"{c.origin[2]:.1f}) mm, radius {c.misr:.2f} mm, "
-                        f"{c.geodesic:.1f} mm along the vessel[/dim]")
+                        f"{c.geodesic:.1f} mm along the vessel from "
+                        + ("where it leaves the aneurysm" if result["measured_from"] == "dome"
+                           else "the neck point") + "[/dim]")
 
                 if _st["truncated"]:
                     console.print(
@@ -1065,6 +1067,14 @@ def do_shell():
                         "perpendicular to the vessel. Raise it with "
                         "'isolate --scaffold 25', or accept it if the vessel "
                         "genuinely leaves the scan there.[/dim]")
+                if _st["untrimmed_edge"] or _st["untrimmed_other"]:
+                    console.print(
+                        f"[yellow]⚠ {_st['untrimmed_edge'] + _st['untrimmed_other']} "
+                        f"opening(s) were not made by a cut[/yellow] "
+                        f"({_st['untrimmed_edge']} on the working-region edge, "
+                        f"{_st['untrimmed_other']} elsewhere).\n"
+                        "[dim]Those vessels were not trimmed to the set length. "
+                        "Check them in the output before running centerlines.[/dim]")
                 if _st["openings_after"] < 2:
                     console.print(
                         f"[yellow]⚠ Only {_st['openings_after']} opening(s) left; "
