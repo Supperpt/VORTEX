@@ -165,6 +165,84 @@ def confirm_output_dir(path: str):
     return path
 
 
+def show_isolation_report(result, ip) -> None:
+    """Print isolate's report table, cut list and warnings.
+
+    Shared by the shell's 'isolate' and the one-off 'isolate' / 'process
+    --isolate' commands, so all of them say the same thing.
+    """
+    _st = result["stats"]
+    table = Table(title="Vessel Isolation", header_style="bold magenta")
+    table.add_column("Item", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Centerline engine", result["engine"])
+    table.add_row("Parent vessel diameter", f"{result['parent_diameter_mm']:.2f} mm")
+    table.add_row("Trim distance",
+                  f"{result['threshold_mm']:.1f} mm  ({ip.n_diameters:g} diameters)")
+    table.add_row("Working region",
+                  f"{result['scaffold_mm']:.0f} mm"
+                  + ("  (auto)" if ip.scaffold_auto else "  (fixed)"))
+    table.add_row("Triangles", f"{_st['cells_before']:,} → {_st['cells_after']:,}")
+    table.add_row("Bounding box diagonal",
+                  f"{_st['bbox_before']:.1f} → {_st['bbox_after']:.1f} mm")
+    table.add_row("Openings", f"{_st['openings_before']} → {_st['openings_after']}")
+    table.add_row("Branch cuts", str(len(result["cuts"])))
+    if result["anchor"].retracted:
+        table.add_row("Neck anchor", "retracted onto the trunk")
+    console.print(table)
+
+    for i, c in enumerate(result["cuts"], 1):
+        console.print(
+            f"[dim]  cut {i}: at ({c.origin[0]:.1f}, {c.origin[1]:.1f}, "
+            f"{c.origin[2]:.1f}) mm, radius {c.misr:.2f} mm, "
+            f"{c.geodesic:.1f} mm along the vessel from "
+            + ("where it leaves the aneurysm" if result["measured_from"] == "dome"
+               else "the neck point") + "[/dim]")
+
+    if _st["truncated"]:
+        console.print(
+            "[yellow]⚠ At least one branch reached the working-region "
+            "boundary before the full trim distance.[/yellow]\n"
+            "[dim]That branch is cut square to the box rather than "
+            "perpendicular to the vessel. Raise it with "
+            "'--scaffold 25', or accept it if the vessel "
+            "genuinely leaves the scan there.[/dim]")
+    if _st["untrimmed_edge"] or _st["untrimmed_other"]:
+        console.print(
+            f"[yellow]⚠ {_st['untrimmed_edge'] + _st['untrimmed_other']} "
+            f"opening(s) were not made by a cut[/yellow] "
+            f"({_st['untrimmed_edge']} on the working-region edge, "
+            f"{_st['untrimmed_other']} elsewhere).\n"
+            "[dim]Those vessels were not trimmed to the set length. "
+            "Check them in the output before running centerlines.[/dim]")
+    _merged = _st["merged_openings"]
+    if _merged:
+        console.print(dashboard.render_merged_openings(_merged))
+    if _st["openings_after"] < 2:
+        console.print(
+            f"[yellow]⚠ Only {_st['openings_after']} opening(s) left; "
+            f"'centerlines' needs at least 2.[/yellow]")
+
+
+def warn_merged_openings(surface) -> None:
+    """Print the WARNING panel if two vessels share an opening on *surface*."""
+    merged = find_merged_openings(surface)
+    if merged:
+        console.print(dashboard.render_merged_openings(merged))
+
+
+def run_isolation(surface, seed_mm, ip):
+    """Run isolate with a spinner and print its report. -> result or None."""
+    try:
+        result = run_pipeline_step("Vessel Isolation", isolate_aneurysm_region,
+                                   surface, seed_mm, ip.copy())
+    except Exception as e:
+        console.print(f"[bold red]Isolation failed:[/bold red] {e}")
+        return None
+    show_isolation_report(result, ip)
+    return result
+
+
 def run_pipeline_step(step_name: str, func, *args, **kwargs):
     """Run a pipeline function with a live status spinner."""
     with console.status(f"[cyan]{step_name}...", spinner="dots") as status:
@@ -581,6 +659,60 @@ def do_remesh(args):
     return 0
 
 
+def _isolate_params(args) -> IsolateParams:
+    """IsolateParams from one-off command flags; unset flags keep the defaults."""
+    ip = IsolateParams()
+    if getattr(args, "diameters", None) is not None:
+        ip.n_diameters = args.diameters
+    if getattr(args, "scaffold", None) is not None:
+        ip.scaffold_mm = args.scaffold
+        ip.scaffold_auto = False        # naming a size means using it, as in the shell
+    if getattr(args, "sphere", None) is not None:
+        ip.cut_sphere_factor = args.sphere
+    return ip
+
+
+def do_isolate(args):
+    """Headless isolate: STL in -> trimmed STL out, same as the shell command."""
+    from vortex.utils.vtk_compat import vtk
+
+    if not os.path.exists(args.input_stl):
+        console.print(f"[bold red]Input STL file not found: {args.input_stl}[/bold red]")
+        return 1
+    try:
+        seed_mm = tuple(map(float, args.seed_mm.split(",")))
+        assert len(seed_mm) == 3
+    except Exception:
+        console.print(f"[bold red]Invalid --seed-mm. Expected 'x,y,z', got '{args.seed_mm}'[/bold red]")
+        return 1
+
+    reader = vtk.vtkSTLReader()
+    reader.SetFileName(args.input_stl)
+    reader.Update()
+    surface = reader.GetOutput()
+    if surface.GetNumberOfCells() == 0:
+        console.print("[bold red]The input STL mesh is empty or invalid.[/bold red]")
+        return 1
+
+    console.print(f"\n[bold blue]Isolating:[/bold blue] {args.input_stl}  "
+                  f"[dim](seed {seed_mm[0]:.1f}, {seed_mm[1]:.1f}, {seed_mm[2]:.1f} mm)[/dim]")
+    result = run_isolation(surface, seed_mm, _isolate_params(args))
+    if result is None:
+        return 1
+
+    out_dir = os.path.dirname(os.path.abspath(args.output))
+    os.makedirs(out_dir, exist_ok=True)
+    writer = vtk.vtkSTLWriter()
+    writer.SetFileName(args.output)
+    writer.SetInputData(result["surface"])
+    writer.Write()
+    console.print(f"\n[bold green]Done![/bold green] Isolated surface saved to: "
+                  f"[cyan]{args.output}[/cyan]\n"
+                  "[dim]Next: process-mesh on it, for centerlines, flow extensions "
+                  "and caps.[/dim]")
+    return 0
+
+
 def do_process_mesh(args):
     from vortex.utils.vtk_compat import vtk
 
@@ -608,6 +740,7 @@ def do_process_mesh(args):
         return 1
 
     centerlines, _ = run_pipeline_step("Centerlines", compute_centerlines, surface)
+    warn_merged_openings(surface)
     final_surface = run_pipeline_step("Flow Extensions & Capping", add_flow_extensions, surface, centerlines, params)
     run_pipeline_step("Exporting STL", export_stl, final_surface, args.output, params)
 
@@ -657,10 +790,22 @@ def do_process(args):
     # 3. Mesh
     surface = run_pipeline_step("Meshing", generate_mesh, vtk_image, params)
 
+    # 4. Isolate (optional): trim the tree to the aneurysm before centerlines
+    if args.isolate:
+        if seed_ijk is None:
+            console.print("[bold red]--isolate needs --seed-ijk: it trims around the seed.[/bold red]")
+            return 1
+        from vortex.pipeline.dicom_loader import ijk_to_mm
+        result = run_isolation(surface, ijk_to_mm(sitk_image, seed_ijk), _isolate_params(args))
+        if result is None:
+            return 1
+        surface = result["surface"]
+
     # Centerlines & Extensions
     final_surface = surface
     if args.centerlines:
         centerlines, _ = run_pipeline_step("Centerlines", compute_centerlines, surface)
+        warn_merged_openings(surface)
 
         if args.flow_extensions:
             # Parse selective IDs if provided
@@ -1032,58 +1177,9 @@ def do_shell():
                 session.clip_sac_view = None
                 session.cap_labels    = {}
 
-                _st = result["stats"]
-                table = Table(title="Vessel Isolation", header_style="bold magenta")
-                table.add_column("Item", style="cyan")
-                table.add_column("Value", style="green")
-                table.add_row("Centerline engine", result["engine"])
-                table.add_row("Parent vessel diameter", f"{result['parent_diameter_mm']:.2f} mm")
-                table.add_row("Trim distance",
-                              f"{result['threshold_mm']:.1f} mm  ({ip.n_diameters:g} diameters)")
-                table.add_row("Working region",
-                              f"{result['scaffold_mm']:.0f} mm"
-                              + ("  (auto)" if ip.scaffold_auto else "  (fixed)"))
-                table.add_row("Triangles", f"{_st['cells_before']:,} → {_st['cells_after']:,}")
-                table.add_row("Bounding box diagonal",
-                              f"{_st['bbox_before']:.1f} → {_st['bbox_after']:.1f} mm")
-                table.add_row("Openings", f"{_st['openings_before']} → {_st['openings_after']}")
-                table.add_row("Branch cuts", str(len(result["cuts"])))
-                if result["anchor"].retracted:
-                    table.add_row("Neck anchor", "retracted onto the trunk")
-                console.print(table)
-
-                for i, c in enumerate(result["cuts"], 1):
-                    console.print(
-                        f"[dim]  cut {i}: at ({c.origin[0]:.1f}, {c.origin[1]:.1f}, "
-                        f"{c.origin[2]:.1f}) mm, radius {c.misr:.2f} mm, "
-                        f"{c.geodesic:.1f} mm along the vessel from "
-                        + ("where it leaves the aneurysm" if result["measured_from"] == "dome"
-                           else "the neck point") + "[/dim]")
-
-                if _st["truncated"]:
-                    console.print(
-                        "[yellow]⚠ At least one branch reached the working-region "
-                        "boundary before the full trim distance.[/yellow]\n"
-                        "[dim]That branch is cut square to the box rather than "
-                        "perpendicular to the vessel. Raise it with "
-                        "'isolate --scaffold 25', or accept it if the vessel "
-                        "genuinely leaves the scan there.[/dim]")
-                if _st["untrimmed_edge"] or _st["untrimmed_other"]:
-                    console.print(
-                        f"[yellow]⚠ {_st['untrimmed_edge'] + _st['untrimmed_other']} "
-                        f"opening(s) were not made by a cut[/yellow] "
-                        f"({_st['untrimmed_edge']} on the working-region edge, "
-                        f"{_st['untrimmed_other']} elsewhere).\n"
-                        "[dim]Those vessels were not trimmed to the set length. "
-                        "Check them in the output before running centerlines.[/dim]")
-                _merged = _st["merged_openings"]
-                session.opening_warnings = {"surface": session.surface, "merged": _merged}
-                if _merged:
-                    console.print(dashboard.render_merged_openings(_merged))
-                if _st["openings_after"] < 2:
-                    console.print(
-                        f"[yellow]⚠ Only {_st['openings_after']} opening(s) left; "
-                        f"'centerlines' needs at least 2.[/yellow]")
+                show_isolation_report(result, ip)
+                session.opening_warnings = {"surface": session.surface,
+                                            "merged": result["stats"]["merged_openings"]}
 
                 console.print(
                     "[dim]Next: 'check' → 'remesh' → [cyan]'centerlines'[/cyan] → 'extend' → "
@@ -1728,6 +1824,16 @@ def create_parser() -> argparse.ArgumentParser:
     rm_p.add_argument("--check", action="store_true",
                       help="Print a mesh quality report on the result")
 
+    # Command: isolate
+    iso_p = subparsers.add_parser("isolate",
+                                  help="Trim a segmented STL to the aneurysm plus N vessel diameters")
+    iso_p.add_argument("input_stl", help="Path to input STL file (e.g. straight from 'process')")
+    iso_p.add_argument("--seed-mm", required=True,
+                       help="Point inside the aneurysm dome, as world coordinates 'x,y,z' in mm. "
+                            "Write --seed-mm=x,y,z when x is negative.")
+    iso_p.add_argument("--output", "-o", default="isolated.stl", help="Path to output STL file")
+    _add_isolate_flags(iso_p)
+
     # Command: process-mesh
     mesh_p = subparsers.add_parser("process-mesh", help="Apply centerlines/extensions/capping to an existing STL")
     mesh_p.add_argument("input_stl", help="Path to input STL file")
@@ -1763,6 +1869,12 @@ def create_parser() -> argparse.ArgumentParser:
     mesh_g.add_argument("--reduce-mesh", type=float, default=0.0, help="Mesh reduction fraction")
     mesh_g.add_argument("--increase-mesh", type=int, default=0, help="Mesh subdivision passes")
 
+    # Isolation
+    iso_g = proc_p.add_argument_group("Vessel Isolation")
+    iso_g.add_argument("--isolate", action="store_true",
+                       help="Trim the tree to the aneurysm after meshing (needs --seed-ijk)")
+    _add_isolate_flags(iso_g)
+
     # Flow extensions
     flow_g = proc_p.add_argument_group("Flow Extensions")
     flow_g.add_argument("--centerlines", action="store_true", help="Compute vessel centerlines")
@@ -1777,6 +1889,16 @@ def create_parser() -> argparse.ArgumentParser:
     out_g.add_argument("--split-patches", action="store_true", help="Split CFD output into separate STLs for wall and caps")
 
     return parser
+
+def _add_isolate_flags(p) -> None:
+    """Flags shared by 'isolate' and 'process --isolate'; unset keeps the default."""
+    p.add_argument("--diameters", type=float, metavar="N",
+                   help="Vessel kept past the aneurysm, in parent diameters (default: 5)")
+    p.add_argument("--scaffold", type=float, metavar="MM",
+                   help="Fix the working-region size instead of sizing it from the data")
+    p.add_argument("--sphere", type=float, metavar="K",
+                   help="Cut localisation radius, in vessel radii (default: 2.5)")
+
 
 def main():
     setup_logging()
@@ -1800,6 +1922,8 @@ def main():
             sys.exit(do_check_mesh(args))
         elif args.command == "remesh":
             sys.exit(do_remesh(args))
+        elif args.command == "isolate":
+            sys.exit(do_isolate(args))
         elif args.command == "process-mesh":
             sys.exit(do_process_mesh(args))
         elif args.command == "process":
