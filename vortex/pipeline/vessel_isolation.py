@@ -54,6 +54,7 @@ from vortex.pipeline.centerlines import (
     compute_centerlines,
     _detect_boundary_profiles,
     _cull_tear_loops,
+    find_merged_openings,
 )
 
 log = logging.getLogger(__name__)
@@ -1030,6 +1031,7 @@ def isolate_aneurysm_region(surface, seed_mm, iso_params=None,
             "truncated":       result["truncated"],
             "untrimmed_edge":  result["untrimmed_edge"],
             "untrimmed_other": result["untrimmed_other"],
+            "merged_openings": result["merged_openings"],
         },
     }
 
@@ -1140,11 +1142,17 @@ def _isolate_once(surface, seed_mm, iso, scaffold_mm, centerlines, prog):
     if other:
         log.warning("%d opening(s) are neither a cut nor on the working-region "
                     "edge. Inspect the result before continuing.", other)
+    merged = find_merged_openings(out)
+    for m in merged:
+        log.warning("The opening at (%.1f, %.1f, %.1f) looks like two vessels "
+                    "sharing one hole; centerlines will treat them as one.",
+                    *m["center_mm"])
 
     return {"surface": out, "centerlines": centerlines, "engine": engine,
             "anchor": anchor, "cuts": cuts, "parent_diameter_mm": diameter,
             "threshold_mm": threshold, "truncated": truncated,
             "untrimmed_edge": at_edge, "untrimmed_other": other,
+            "merged_openings": merged,
             "measured_from": "neck" if dome is None else "dome"}
 
 

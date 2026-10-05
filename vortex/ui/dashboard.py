@@ -50,12 +50,12 @@ USE_UNICODE = _supports_unicode()
 _GLYPHS_UNICODE = {
     "ok": "✓", "no": "—", "sep": "›", "cur": "»", "here": "▲",
     "detour": "└→", "arrow": "→", "cut": "┃", "dot": "·",
-    "ramp": "░▒▓█",
+    "ramp": "░▒▓█", "warn": "⚠",
 }
 _GLYPHS_ASCII = {
     "ok": "v", "no": "-", "sep": ">", "cur": ">", "here": "^",
     "detour": "\\>", "arrow": "->", "cut": "|", "dot": ".",
-    "ramp": ".:+#",
+    "ramp": ".:+#", "warn": "!",
 }
 
 GLYPHS = _GLYPHS_UNICODE if USE_UNICODE else _GLYPHS_ASCII
@@ -403,6 +403,38 @@ def render_clip_sac(view) -> Panel:
 # Dashboard — clear + render panels (scrollback model)
 # ---------------------------------------------------------------------------
 
+def render_merged_openings(merged) -> Panel:
+    """WARNING panel — openings where two vessels share one hole."""
+    g = GLYPHS
+    body = Text()
+    n = len(merged)
+    body.append(f"{n} opening{'s' if n > 1 else ''} where two vessels share one hole\n",
+                style="vortex.bright")
+    for m in merged:
+        x, y, z = m["center_mm"]
+        body.append(f"  at ({x:.1f}, {y:.1f}, {z:.1f}) mm\n", style="vortex.warn")
+    body.append("\nCenterlines treat each as one vessel, so the other one gets no "
+                "centerline and no flow extension, and clip-sac can fail nearby.\n",
+                style="vortex.dim")
+    body.append("Usually the segmentation merged two touching vessels: "
+                "re-segment with a different HU range.", style="vortex.dim")
+    return Panel(body, title=f"{g['warn']} WARNING", title_align="left",
+                 border_style="vortex.warn", padding=(0, 1))
+
+
+def opening_warnings(session) -> list:
+    """Merged openings recorded for the *current* surface, else [].
+
+    Stored with the surface object they were measured on, so any command that
+    replaces the surface (mesh, load-mesh, isolate, --undo, remesh, reset)
+    retires the warning without each one having to clear it.
+    """
+    w = getattr(session, "opening_warnings", None)
+    if not w or w.get("surface") is not getattr(session, "surface", None):
+        return []
+    return w.get("merged") or []
+
+
 def render_dashboard(console, session) -> None:
     """Clear the screen and draw the dashboard above the prompt (one render/turn)."""
     console.clear()
@@ -413,6 +445,10 @@ def render_dashboard(console, session) -> None:
     else:
         console.print(status)
         console.print(pipeline)
+
+    merged = opening_warnings(session)
+    if merged:
+        console.print(render_merged_openings(merged))
 
     view = getattr(session, "clip_sac_view", None)
     if view:

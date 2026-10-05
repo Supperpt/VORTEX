@@ -26,7 +26,7 @@ from vortex.state.app_state import PipelineParams, IsolateParams
 from vortex.pipeline.dicom_loader import list_series, load_series
 from vortex.pipeline.segmentation import segment
 from vortex.pipeline.meshing import generate_mesh, remesh_surface
-from vortex.pipeline.centerlines import compute_centerlines
+from vortex.pipeline.centerlines import compute_centerlines, find_merged_openings
 from vortex.pipeline.flow_extensions import add_flow_extensions
 from vortex.pipeline.exporter import export_stl
 from vortex.pipeline.mesh_quality import check_mesh_quality, extract_bad_triangles
@@ -60,6 +60,7 @@ class Session:
         self.clip_sac_view: Optional[dict] = None  # cached clip-sac context for the dashboard panel
         self.pre_isolation_surface: Any = None     # stashed by 'isolate' for --undo
         self.surface_source: Optional[str] = None  # "mesh" or "load-mesh"; drives the dashboard hint
+        self.opening_warnings: Optional[dict] = None  # merged openings, keyed to the surface they describe
         self.isolation_info: Optional[dict] = None # cached 'isolate' report context
         self.isolation_centerlines: Any = None     # reusable across 'isolate' re-runs
         self.params: PipelineParams = PipelineParams()
@@ -1075,6 +1076,10 @@ def do_shell():
                         f"{_st['untrimmed_other']} elsewhere).\n"
                         "[dim]Those vessels were not trimmed to the set length. "
                         "Check them in the output before running centerlines.[/dim]")
+                _merged = _st["merged_openings"]
+                session.opening_warnings = {"surface": session.surface, "merged": _merged}
+                if _merged:
+                    console.print(dashboard.render_merged_openings(_merged))
                 if _st["openings_after"] < 2:
                     console.print(
                         f"[yellow]⚠ Only {_st['openings_after']} opening(s) left; "
@@ -1249,6 +1254,10 @@ def do_shell():
                         
                         console.print(table)
                         console.print("[dim]Use these IDs to select specific vessels for 'extend' (Future). Currently all are extended.[/dim]")
+                    _merged = find_merged_openings(session.surface)
+                    session.opening_warnings = {"surface": session.surface, "merged": _merged}
+                    if _merged:
+                        console.print(dashboard.render_merged_openings(_merged))
 
             elif cmd == "extend":
                 if session.centerlines is None:

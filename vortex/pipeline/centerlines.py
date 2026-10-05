@@ -269,6 +269,52 @@ def _cull_tear_loops(surface: "vtk.vtkPolyData", min_radius_mm: float) -> "vtk.v
 # Boundary profile detection
 # ---------------------------------------------------------------------------
 
+def find_merged_openings(surface: "vtk.vtkPolyData", max_ratio: float = 0.1,
+                         min_radius_mm: float = 0.3) -> list:
+    """Openings that look like two vessels sharing one hole.
+
+    Where two vessels touch, a cut through both leaves a single figure-of-eight
+    rim. Its centre falls on the waist between the lumens, so the rim comes
+    almost to the centre: closest/farthest rim distance 0.04 on AA_003's A2s,
+    against 0.20-0.90 for every ordinary opening across the reference cases,
+    oblique cuts included. Centerlines then aim at that waist, one vessel gets
+    no centerline at all, and clip-sac's bulge field fails around it.
+
+    Read-only: reports, changes nothing. Returns [{center_mm, ratio}].
+    """
+    edges = vtk.vtkFeatureEdges()
+    edges.SetInputData(surface)
+    edges.BoundaryEdgesOn()
+    edges.FeatureEdgesOff()
+    edges.ManifoldEdgesOff()
+    edges.NonManifoldEdgesOff()
+    edges.Update()
+    if edges.GetOutput().GetNumberOfPoints() == 0:
+        return []
+    conn = vtk.vtkPolyDataConnectivityFilter()
+    conn.SetInputData(edges.GetOutput())
+    conn.SetExtractionModeToAllRegions()
+    conn.ColorRegionsOn()
+    conn.Update()
+    pts = vtk_np.vtk_to_numpy(conn.GetOutput().GetPoints().GetData())
+    region = vtk_np.vtk_to_numpy(conn.GetOutput().GetPointData().GetArray("RegionId"))
+
+    merged = []
+    for k in range(conn.GetNumberOfExtractedRegions()):
+        rim = pts[region == k]
+        if len(rim) < 8:
+            continue
+        center = rim.mean(axis=0)
+        reach = np.linalg.norm(rim - center, axis=1)
+        if reach.mean() < min_radius_mm:        # a sliver, not a vessel
+            continue
+        ratio = float(reach.min() / reach.max())
+        if ratio < max_ratio:
+            merged.append({"center_mm": tuple(float(v) for v in center),
+                           "ratio": round(ratio, 2)})
+    return merged
+
+
 def _detect_boundary_profiles(surface: "vtk.vtkPolyData") -> list:
     """Detect open boundary profiles (free edges) on the surface.
 
