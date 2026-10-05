@@ -50,12 +50,12 @@ USE_UNICODE = _supports_unicode()
 _GLYPHS_UNICODE = {
     "ok": "✓", "no": "—", "sep": "›", "cur": "»", "here": "▲",
     "detour": "└→", "arrow": "→", "cut": "┃", "dot": "·",
-    "ramp": "░▒▓█",
+    "ramp": "░▒▓█", "warn": "⚠",
 }
 _GLYPHS_ASCII = {
     "ok": "v", "no": "-", "sep": ">", "cur": ">", "here": "^",
     "detour": "\\>", "arrow": "->", "cut": "|", "dot": ".",
-    "ramp": ".:+#",
+    "ramp": ".:+#", "warn": "!",
 }
 
 GLYPHS = _GLYPHS_UNICODE if USE_UNICODE else _GLYPHS_ASCII
@@ -97,6 +97,10 @@ def _has_caps(session) -> bool:
         return False
 
 
+def _has_isolated(session) -> bool:
+    return getattr(session, "pre_isolation_surface", None) is not None
+
+
 def _has_sac(session) -> bool:
     return getattr(session, "sac_surface", None) is not None
 
@@ -114,6 +118,12 @@ def current_step(session) -> str:
         return "segment"
     if _has_mask(session) and not _has_surface(session):
         return "mesh"
+    # Straight after 'mesh' the tree is untrimmed: point at 'isolate', the
+    # in-app alternative to editing externally. A 'load-mesh' surface is
+    # usually already edited and goes straight to centerlines.
+    if (getattr(session, "surface_source", None) == "mesh"
+            and not _has_isolated(session) and not _has_centerlines(session)):
+        return "isolate"
     if not _has_centerlines(session):
         return "centerlines"
     if not _has_caps(session):
@@ -136,6 +146,8 @@ def _completed_steps(session) -> set:
         done.add("segment")
     if _has_surface(session):
         done.add("mesh")
+    if _has_isolated(session):
+        done.add("isolate")
     if _has_centerlines(session):
         done.add("centerlines")
     if _has_caps(session):
@@ -158,14 +170,18 @@ def next_commands(session) -> list:
         ordered.append("view")
     # Reasonable follow-ons from the current state.
     if _has_surface(session):
-        for c in ("check", "remesh", "centerlines", "extend", "clip-sac", "cap_label", "export", "metrics"):
+        # "isolate" sits ahead of centerlines: it trims the tree and creates
+        # the openings centerlines then needs. Deliberately not in
+        # current_step()/_completed_steps -- it is optional, like "check", and
+        # listing it there would make every DICOM run look incomplete.
+        for c in ("check", "isolate", "remesh", "centerlines", "extend", "clip-sac", "cap_label", "export", "metrics"):
             if c not in ordered:
                 ordered.append(c)
     if not _has_surface(session):
         for c in ("load", "load-mesh", "list", "seed", "set-seed", "sample-hu", "segment", "mesh"):
             if c not in ordered:
                 ordered.append(c)
-    for c in ("status", "params", "reset", "help", "exit"):
+    for c in ("status", "params", "isolate-params", "reset", "help", "exit"):
         if c not in ordered:
             ordered.append(c)
     return ordered
@@ -268,8 +284,9 @@ def _pipeline_lines():
         [("load", "step"), (f" {g['sep']} ", "sep"), ("seed", "step"),
          (f" {g['sep']} ", "sep"), ("segment", "step"),
          (f" {g['sep']} ", "sep"), ("mesh", "step")],
-        [("   ", "plain"), (g["detour"], "sep"), (" ", "plain"),
-         ("[edit ext.]", "ext"), (f" {g['arrow']} ", "sep"), ("load-mesh", "step")],
+        [("   ", "plain"), (g["detour"], "sep"), (" ", "plain"), ("isolate", "step"),
+         (" or ", "sep"), ("[edit ext.]", "ext"), (f" {g['arrow']} ", "sep"),
+         ("load-mesh", "step")],
         [("centerlines", "step"), (f" {g['sep']} ", "sep"), ("extend", "step"),
          (f" {g['sep']} ", "sep"), ("set-seed", "step")],
         [("clip-sac", "step"), (f" {g['sep']} ", "sep"), ("check", "step"),
@@ -386,6 +403,38 @@ def render_clip_sac(view) -> Panel:
 # Dashboard — clear + render panels (scrollback model)
 # ---------------------------------------------------------------------------
 
+def render_merged_openings(merged) -> Panel:
+    """WARNING panel — openings where two vessels share one hole."""
+    g = GLYPHS
+    body = Text()
+    n = len(merged)
+    body.append(f"{n} opening{'s' if n > 1 else ''} where two vessels share one hole\n",
+                style="vortex.bright")
+    for m in merged:
+        x, y, z = m["center_mm"]
+        body.append(f"  at ({x:.1f}, {y:.1f}, {z:.1f}) mm\n", style="vortex.warn")
+    body.append("\nCenterlines treat each as one vessel, so the other one gets no "
+                "centerline and no flow extension, and clip-sac can fail nearby.\n",
+                style="vortex.dim")
+    body.append("Usually the segmentation merged two touching vessels: "
+                "re-segment with a different HU range.", style="vortex.dim")
+    return Panel(body, title=f"{g['warn']} WARNING", title_align="left",
+                 border_style="vortex.warn", padding=(0, 1))
+
+
+def opening_warnings(session) -> list:
+    """Merged openings recorded for the *current* surface, else [].
+
+    Stored with the surface object they were measured on, so any command that
+    replaces the surface (mesh, load-mesh, isolate, --undo, remesh, reset)
+    retires the warning without each one having to clear it.
+    """
+    w = getattr(session, "opening_warnings", None)
+    if not w or w.get("surface") is not getattr(session, "surface", None):
+        return []
+    return w.get("merged") or []
+
+
 def render_dashboard(console, session) -> None:
     """Clear the screen and draw the dashboard above the prompt (one render/turn)."""
     console.clear()
@@ -396,6 +445,10 @@ def render_dashboard(console, session) -> None:
     else:
         console.print(status)
         console.print(pipeline)
+
+    merged = opening_warnings(session)
+    if merged:
+        console.print(render_merged_openings(merged))
 
     view = getattr(session, "clip_sac_view", None)
     if view:

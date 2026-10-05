@@ -1,6 +1,6 @@
 # VORTEX Aneurysm — Implementation State & Pivot Summary
 
-_Last updated: September 22, 2026_
+_Last updated: October 5, 2026_
 
 ---
 
@@ -114,6 +114,9 @@ Implemented a REPL using `prompt_toolkit` and `rich`:
 - **Boundary Detection Table**: After `centerlines`, a table shows all detected openings with IDs, physical (x,y,z) coordinates, and estimated radii (mm).
 - **Live Status Spinner**: Long-running C++ operations (ITK/VTK) lock the main Python thread, making standard `rich` progress bars appear frozen. The pipeline now uses `console.status` with a live spinner and text updates, which is much more reliable for background C++ processing.
 - Supports incremental processing: `load` -> `segment` -> `mesh` -> `centerlines` -> `extend` -> `export`.
+- **Errors stay on screen** (2026-10-05): the dashboard clears the screen every turn, so an error printed by a command used to vanish unread — `segment` without a seed looked like nothing happened. Errors, unknown commands and failure paths now wait for Enter (`pause_to_read`); `segment` checks for a seed first.
+- **`export` / `export-mask` ask before creating a missing directory**, and expand `~` (it used to create a literal `~` folder).
+- **Pinned warnings:** `session.opening_warnings` is stored with the surface object it describes; the dashboard shows it only while `session.surface` is that same object, so any command that replaces the surface retires it without having to clear it.
 - This avoids re-loading and re-processing when only late-stage parameters (like flow extension ratio) need adjustment.
 
 ### 3D Preview (`preview`)
@@ -320,6 +323,192 @@ completes — comparing WSS/TAWSS/OSI against its own non-remeshed run (same pat
 same BCs, one variable). No remeshed surface has ever been through OpenFOAM, and the
 README now *recommends* `remesh`, so this gap is worth closing before it surfaces on
 a patient case mid-study.
+
+---
+
+## 🧪 `isolate` (issue #7) — validated on four cases, not yet on `main`
+
+**Branch `feature_isolation`.** Sessions 2026-09-25 (built) and 2026-09-26 →
+2026-10-05 (owner testing, rework). The owner reviewed every output in MeshLab:
+AA_009 and AA_001 look right, AA_009 has been through the full downstream chain
+(`load-mesh → centerlines → extend → clip-sac → export`, "works perfectly"),
+AA_003 is limited by its segmentation, AA_002 is set aside (poor CT).
+
+### What it is
+
+`isolate` trims a segmented tree to the aneurysm plus N parent diameters of every
+attached vessel, replacing the manual sectioning step in MeshLab/Meshmixer.
+Shell order: `load → seed → segment → mesh → isolate → centerlines → extend →
+clip-sac → export` (`remesh` may go after `isolate`).
+
+Available everywhere since 2026-10-05:
+
+- **Shell:** `isolate [--diameters N] [--scaffold MM] [--sphere K] [--undo]`, and
+  `isolate-params`. The pipeline panel shows `└→ isolate or [edit ext.] → load-mesh`
+  and points at `isolate` straight after `mesh`.
+- **One-off:** `./run-cli.sh isolate in.stl --seed-mm=x,y,z -o out.stl [same flags]`
+  (the `=` is required when x is negative, or argparse reads it as an option), and
+  `./run-cli.sh process … --seed-ijk i,j,k --isolate`, which isolates after meshing and
+  before centerlines. Verified on AA_009 from DICOM: same 4 cuts as the shell.
+- The report (`show_isolation_report` in `cli.py`) is shared, so all three print
+  the same table, cut list and warnings.
+
+Module `vortex/pipeline/vessel_isolation.py`; settings in `IsolateParams`,
+deliberately **not** in `PipelineParams` so its hand-written `copy()` stays untouched.
+
+### How it trims, in order
+
+1. **Working region** — a box around the seed, grown 8 → 10 → 12 → 15 → 20 mm while the
+   triangle count grows smoothly; a jump over `_BONE_JUMP` (2.2×) means bone came in,
+   so it stops. Box faces that cut through vessels become clean openings.
+2. **Centerlines** — VMTK, opening to opening, after filling holes smaller than
+   `tear_radius_mm`.
+3. **Tree** — points that coincide are merged, each edge counted **once**, and lines
+   running side by side within half a vessel radius are joined (`_parallel_bridges`).
+4. **Neck** — the centerline point nearest the seed.
+5. **Parent diameter** — the **widest branch**, each measured at its steady width
+   (median from 4 mm past the neck to 1 mm short of its end).
+6. **Dome** — `clip-sac`'s bulge field run on the working region. Trusted only if the
+   wall nearest the seed falls inside it; otherwise lengths fall back to the neck point.
+7. **Cuts** — on every branch, N × diameter **past where that branch leaves the dome**,
+   perpendicular to the centerline.
+8. **Apply** — each cut removes (beyond its plane ∩ a sphere). Tight sphere first; if a
+   cut does not separate its vessel, widen it — but never past the seed or the dome; if
+   it still cannot, **drop the cut** and report the vessel as untrimmed.
+9. **Report** — untrimmed openings (box edge / elsewhere), and openings where two
+   vessels share one hole.
+
+### Findings from the owner's testing (2026-09-26 → 10-05)
+
+The owner's first feedback: on AA_009 (anterior communicating, AComm) the parent
+vessels came out far longer than 5 diameters and the daughters short. That traced to
+**five independent defects**, all fixed and each verified on the owner's own output:
+
+1. **Shared centerline stretches were counted several times.** A trunk shared by k VMTK
+   polylines produced k duplicate edges, and `scipy.sparse` **sums** duplicates: AA_009
+   had 222 edges at true length, 96 at 2×, 56 at 4×. Every geodesic through the neck
+   region was stretched.
+2. **The tear filter filled real vessels.** `vtkFillHolesFilter` with `tear_radius_mm =
+   1.0` filled openings up to ~1 mm radius, and AA_009's A1s are 0.6–1.1 mm: no opening →
+   no centerline → never cut and never reported (at 10 mm, 4 openings became 1, which
+   is why AA_009 had fallen back to the slow network skeletoniser). Slivers measure
+   under 0.45 mm. **Default is now 0.3.**
+3. **Hairpin detours.** Two VMTK lines 0.4 mm apart but unmerged made the route to the
+   left A1 go out to a neighbouring bifurcation and back; the only cut landed on the
+   detour and the A1 stayed attached to the neck. Fixed by bridging (step 3 above).
+4. **The diameter was read on the wrong vessel.** On AComm aneurysms the neck sits on the
+   communicating segment or an A2: 1.12 mm on AA_009 against 1.60 mm for its A1, which
+   cut everything at ~3 of its own diameters. The owner proposed "first reading above
+   2 mm, near → far"; measured, it picks bulges (5.2 mm on AA_003 is the aneurysm's own
+   neck; 2.08 mm on AA_009 is a junction), and AA_009's A1s never reach 2 mm. The owner
+   accepted "widest branch at steady width" instead. Below 1.2 mm it warns.
+5. **One cut took two vessels.** The sphere was sized from a slab search out to 6× MISR,
+   which took in the *other* A2 running parallel 3.6 mm away: a 0.90 mm rim measured as
+   4.38 mm, sphere 10.9 mm, and one plane cut both A2s (14.7 mm on AA_003). Now sized
+   from the vessel's own rim — the plane's contour loop through the cut centre
+   (`_cut_rim`) — and kept short of anything else in the plane.
+
+Then, after the owner's second review:
+
+6. **One neck point cannot stand for where every vessel leaves the aneurysm.** Measured
+   past the dome, AA_009's left A2 kept 1.2 diameters against 2.7–2.9 for the others,
+   and AA_001's parent 1.2 against 5.2 for the distal vessel — exactly what the owner
+   saw. Lengths are now measured from each branch's last contact with the dome
+   (`_length_past_dome`); all AA_009 branches now get 8.0 mm, AA_001's both 10.4 mm.
+7. **Vessel loops the centerlines cannot see.** On AA_003 the segmentation has no wall
+   between the right A2 and the dome (owner: anatomically implausible, a threshold
+   problem), so cutting one A2 left everything beyond attached through the other. The
+   old oversized sphere had hidden this by luck. The wide fallback sliced the dome
+   where the right A2 merges into it, so both sphere sizes are now capped short of the
+   seed's clear ball and of dome wall beyond the plane; a cut that still cannot
+   separate is dropped. Moving stuck cuts back toward the aneurysm was tried and
+   **removed** — on AA_009 it left fragments of the A2 contact attached.
+8. **Merged openings.** On AA_003 the A2s touch at the working-region edge, so the box
+   cut both and left one figure-of-eight hole. `centerlines` then aims at its waist
+   (MISR 0.11 mm), the right A2 gets no centerline or extension, and `clip-sac` fails
+   (bulge 20–52 on the right A2 drowns the dome's 1.6–2.6). `find_merged_openings` in
+   `centerlines.py` flags a rim whose closest/farthest distance from its centre is
+   below 0.1 (AA_003: 0.04; every ordinary opening across all outputs: 0.20–0.90; 36
+   files checked, only AA_003 flagged). `isolate`, `centerlines`, `process` and
+   `process-mesh` show it as a WARNING panel; in the shell it stays pinned in the
+   dashboard until the surface changes. **`clip-sac` was deliberately left unchanged**
+   (owner's decision) — the fix for AA_003 is re-segmentation.
+
+### Lessons worth keeping
+
+- **Use the owner's seed, never a mesh centroid.** The first half of the 2026-09-26
+  analysis used the centre of `output_roi_10.stl` as AA_009's seed; it sat in the left A2,
+  so the "neck" was on the A2 and every conclusion about it was wrong. The owner's seeds
+  (from `seed` on the largest series, converted to mm) and dome points (MeshLab):
+
+  | Case | Seed ijk | Seed mm | Dome point mm |
+  |---|---|---|---|
+  | AA_001 | 194,208,202 | -27.5, -31.3, 171.3 | -29.4, -32.2, 171.7 |
+  | AA_002 | 173,200,348 | -40.5, -13.0, 284.0 | -41.1, -13.0, 287.2 |
+  | AA_003 | 246,207,263 | -10.1, -27.5, 176.3 | -9.8, -26.4, 179.1 |
+  | AA_009 | 235,186,424 | -9.6, -44.8, 288.5 | -9.8, -45.9, 286.9 |
+
+  Use the ijk seeds (or full-precision mm) — see open issue 1 on AA_003's sensitivity.
+- **Check your reproduction before reasoning from it.** With the owner's seeds and
+  `output_roi_20.stl`, the code reproduced their 15:20 outputs to 0.1 mm per opening.
+- **A fix that looks worse may be removing a lucky accident.** Fixing the sphere alone
+  made AA_009/AA_003 worse, because the oversized sphere had been covering for missing
+  centerlines. The fixes only make sense together.
+
+### The sphere trap (worth knowing before touching `apply_cuts`)
+
+A plane is infinite, so each cut is confined to a sphere. **That sphere must fully
+clear the vessel cross-section**: while it cuts through the rim, the opening follows
+the sphere instead of the plane, and the error *grows* with radius until the sphere
+clears — 0.48 mm deviation at 3× MISR, 0.78 at 4×, 1.08 at 5×, then exactly 0.00. The
+other side is finding 5: too big, and it cuts the neighbour. Hence: at least the
+vessel's own rim, at most halfway to anything else in the plane, never the dome.
+
+### Earlier findings (2026-09-25), still true
+
+1. **Vessel ends can come out of `segment`/`mesh` sealed**, intermittently; mechanism
+   undetermined (morphological closing ruled out). The box clip cuts its own openings.
+2. **A fixed working region cannot work.** Too small truncates the trim; too large takes
+   in bone and the measured diameter becomes meaningless (AA_003 12 → 15 mm: 2.25 →
+   8.93 mm). Auto-*widening* when a branch is cut short was exactly backwards (AA_001
+   15 → 30 mm: diameter 1.62 → 19.24 mm) and was removed. Truncation is reported, never
+   auto-fixed.
+3. **`compute_centerlines` could return empty geometry silently** (fixed, `11b2f55`):
+   the `profileidlist` ids index our sorted list, not VMTK's caps. Retries with
+   `pointlist`. The VMTK "Seed id exceeds input number of points!" lines in the
+   output are that retry, and are harmless.
+
+### Current measured state (owner's seeds, `output_roi_20.stl`)
+
+| Case | Type | Region | Ø (widest branch) | Trim | Measured from | Cuts | Result |
+|---|---|---|---|---|---|---|---|
+| AA_009 | AComm | 12 mm | 1.60 mm | 8.0 mm | dome | 4 | owner: good; A2s share one plane (they touch 6.3 mm past the dome), right A2 ~3 mm shorter |
+| AA_001 | MCA | 15 mm | 2.08 mm | 10.4 mm | dome | 2 | owner: good; a parent side branch now reaches the box edge, flagged |
+| AA_003 | AComm | 12 mm | 2.13 mm | 10.7 mm | neck (dome not found) | 2 | A2 cut dropped, A2s untrimmed to a merged opening, flagged; needs re-segmentation |
+| AA_002 | MCA | 12 mm | 2.59 mm | 13.0 mm | dome | 0 | trim longer than the region; all 3 vessels flagged |
+
+### Open issues
+
+1. **AA_003 is seed-sensitive.** Its exact seed gives the result above. Rounding the seed
+   by 0.05 mm makes VMTK's centerline retry run through the dome at 12 mm (20.4 mm
+   "diameter", rejected), so `isolate` steps down to 10 mm — and there AA_003 gets 4 clean
+   cuts and no merged opening. Which region is right is a VMTK-stability question, not
+   settled.
+2. **Bone could be mistaken for dome.** The dome check only confirms the region contains
+   the wall next to the seed, not that it is *only* dome. None of the four cases had bone
+   near the aneurysm, so this is untested.
+3. **Untested in the shell with the final code:** `isolate --undo`, `isolate-params`.
+   The owner's shell runs on 2026-09-26 used the code as of the edge-count fix.
+4. **AA_002** needs a larger region than bone allows for its 13 mm trim.
+5. **Bifurcation non-regression** (issue #7's explicit requirement): AA_001 and AA_002
+   are MCA bifurcations; AA_001 is good, AA_002 is not assessed.
+
+### The sanity checks to teach users
+
+- **The parent diameter.** A cerebral artery reads roughly 1.5–4 mm. Far outside that,
+  the region took in bone or the seed is not in the dome.
+- **Any warning panel or ⚠ line.** Untrimmed openings and merged openings both mean the
+  output needs a look before `centerlines`; a merged opening means re-segment.
 
 ## ⚠️ Known Issues for Future LLMs
 
