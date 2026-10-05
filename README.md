@@ -116,7 +116,8 @@ export raw_vessel.stl   ← save for external editing
 
 **Try `isolate` first.** It uses the seed to trim the mesh down to the aneurysm
 plus a set length of every vessel attached to it, cutting each one square to its
-own centerline. That replaces the manual sectioning step for most cases:
+own centerline. That replaces the manual sectioning step for most cases. Right
+after `mesh`, the pipeline panel points at it (`└→ isolate or [edit ext.]`).
 
 ```
 isolate                  ← trim to the aneurysm + 5 vessel diameters (default)
@@ -126,6 +127,20 @@ isolate --undo           ← put the previous surface back
 check                    ← confirm one region, and one opening per cut
 ```
 
+How it decides where to cut:
+
+- **Length is measured per vessel, from where it leaves the aneurysm.** Every
+  vessel keeps N diameters past the dome — parent and daughters alike — rather
+  than N diameters from one point at the neck. (If it cannot find the dome, it
+  says so and measures from the neck instead.)
+- **The diameter is the parent's**: the widest vessel at the aneurysm, measured
+  where its width is steady, past the bulge at the junction. On anterior
+  communicating aneurysms that is the A1, not the thin communicating segment.
+- **Each vessel gets its own cut**, kept clear of neighbouring vessels and of
+  the dome. Where two vessels touch further along (e.g. two A2s side by side),
+  one cut may have to take both; where a vessel cannot be separated without
+  cutting the dome, it is left untrimmed and reported.
+
 `isolate` sizes its own working region around the seed, growing it only while
 the surface inside still looks like vessel. That matters near the skull base:
 on the two anterior communicating artery cases tested, going from a 12 mm to a
@@ -133,8 +148,16 @@ on the two anterior communicating artery cases tested, going from a 12 mm to a
 measure 9 mm instead of 2 mm. Since the measured diameter sets the trim
 distance, one bad measurement corrupts everything after it. The reported
 diameter is the number to sanity-check: a cerebral artery should read roughly
-2-4 mm. If it does not, the region has taken in bone, and `--scaffold` with a
+1.5-4 mm. If it does not, the region has taken in bone, and `--scaffold` with a
 smaller value is the fix.
+
+**Read the warnings.** `isolate` reports any opening it did not make itself — a
+vessel that ran out of the working region, or one it could not separate — so
+you can check it before `centerlines`. If it shows a **⚠ WARNING** panel about
+two vessels sharing one opening, the segmentation has merged two touching
+vessels into one hole: `centerlines` will see one vessel instead of two and
+`clip-sac` can fail. Re-segment with a different HU range (see `sample-hu`).
+The panel stays in the dashboard until the surface changes.
 
 Settings live in `isolate-params`, separate from `params`. Note `roi_radius` in
 `params` is a *segmentation* setting and has nothing to do with the region
@@ -340,12 +363,12 @@ export aneurysm.stl
 | `sample-hu [radius]` | Sample the lumen HU distribution in a sphere around the seed (default radius 3 mm) and print percentiles (min/p5/median/p95/p99/max) with suggested `lower`/`upper` thresholds. **Requires DICOM + seed.** Pick thresholds from data instead of trial-and-error. |
 | `status` | Show the pipeline dashboard (what is loaded and ready). |
 | `params` | View and edit pipeline parameters (HU thresholds, `roi_radius`, `use_levelset`, `split_patches`, etc.). |
-| `segment` | Segment the DICOM volume using thresholds and the selected seed. |
+| `segment` | Segment the DICOM volume using thresholds and the selected seed. Needs a seed from `seed` (it says so if there is none). |
 | `mesh` | Generate the 3D surface mesh from the segmentation. |
 | `isolate [--diameters N] [--scaffold MM] [--sphere K] [--undo]` | Trim the mesh to the aneurysm plus N parent-vessel diameters of every attached vessel, cutting each one perpendicular to its own centerline. Replaces manual sectioning in MeshLab/Meshmixer for most cases. Run after `mesh`/`load-mesh`. **`centerlines` must be re-run afterwards** — `isolate` creates new openings, and any centerlines computed before it are discarded. Does not remove bone fused to the vessel; it warns instead. Settings live in `isolate-params`. |
 | `isolate-params` | Show and edit the isolation settings. Kept separate from `params`, which stays a segmentation/meshing table. |
 | `remesh` | Taubin-smooth + curvature-adaptively remesh the surface (vmtkSurfaceRemeshing) for CFD-grade triangle quality — fine triangles on the dome, coarse on flat vessel. Run on the lumen surface **before `centerlines`/`extend`**. Tunable via `remesh_edge_length` / `remesh_min_edge_length` / `remesh_adaptive` / `remesh_smooth_iterations` in `params` — see "Tuning the `remesh` parameters" above. |
-| `centerlines` | Compute vessel centerlines. |
+| `centerlines` | Compute vessel centerlines. Warns if two vessels share one opening (see Phase 2). |
 | `extend` | Add flow extensions and cap the model. Must run before `clip-sac`. |
 | `metrics` | Calculate morphological metrics for the aneurysm. Works with any seed source. |
 | `clip-sac [--ratio N]` | Split the wall into dome + parent vessel via the centerline bulge field. Writes `sac_bulge_heatmap.ply` and prints field stats; tune the split with `--ratio`. Run after `extend`. |
@@ -353,11 +376,13 @@ export aneurysm.stl
 | `cap_label` | Label each cap as inlet/outlet (`i`/`o`) so export writes `inlet.stl` / `outlet_N.stl`. Run after `extend`. |
 | `check` | Check mesh quality: manifold edges, open boundary loops, triangle quality, normal consistency. |
 | `check --deep` | Same as `check`, plus self-intersection detection (slow). |
-| `export <file>` | Save the final STL (and split patches if `split_patches = True`). Defaults to `output.stl`. |
+| `export <file>` | Save the final STL (and split patches if `split_patches = True`). Defaults to `output.stl`. Asks before creating a directory that does not exist. |
 | `export-mask <file.nii.gz>` | Export the segmentation mask (NIfTI format) for AI or radiomics. |
 
 **Where does the output go?**
-By default, `export <filename.stl>` saves to your **current working directory**. Provide a full path to save elsewhere: `export /home/user/Desktop/final.stl`.
+By default, `export <filename.stl>` saves to your **current working directory**. Provide a full path to save elsewhere: `export /home/user/Desktop/final.stl`. `~` works too: `export ~/Desktop/final.stl`.
+
+**Errors stay on screen.** The dashboard redraws after every command; when a command fails, VORTEX waits for Enter so the message can be read first.
 
 ---
 
@@ -422,6 +447,21 @@ settings or preparing a batch of cases.
 | `--uniform` | Disable curvature adaptation; use `--edge` everywhere |
 | `--check` | Print a mesh quality report on the result |
 
+### Isolate the Aneurysm in an STL
+Trim a segmented STL to the aneurysm plus N vessel diameters — the same as the
+shell's `isolate`, with the same report and warnings. The seed is a point inside
+the dome, in mm (e.g. picked in MeshLab).
+```bash
+./run-cli.sh isolate raw_vessel.stl --seed-mm=-9.6,-44.8,288.5 -o isolated.stl
+./run-cli.sh isolate raw_vessel.stl --seed-mm=-9.6,-44.8,288.5 -o isolated.stl --diameters 3
+```
+Write `--seed-mm=` with an equals sign when the first coordinate is negative;
+otherwise the value is read as another option and the command stops with
+"expected one argument". (The same applies to `sample-hu --seed-mm`.)
+Then run `process-mesh` on the result for centerlines, flow extensions and caps.
+Give the seed with full precision when you have it: on one test case, rounding it
+by 0.05 mm changed which working region the centerlines succeeded in.
+
 ### Process an Existing STL Mesh
 Apply centerlines, flow extensions, and watertight capping to an already segmented STL.
 ```bash
@@ -435,6 +475,17 @@ Includes centerlines, flow extensions, and watertight capping from DICOM.
     --centerlines \
     --flow-extensions \
     --flow-ext-ratio 5.0 \
+    --output aneurysm_cfd.stl
+```
+
+### Full Pipeline with Isolation
+Add `--isolate` to trim to the aneurysm after meshing, before centerlines. It
+needs the seed (`--seed-ijk`, e.g. from `seed-picker`).
+```bash
+./run-cli.sh process /path/to/dicom/folder \
+    --seed-ijk 235,186,424 --roi-radius 20 \
+    --isolate \
+    --centerlines --flow-extensions \
     --output aneurysm_cfd.stl
 ```
 
@@ -483,6 +534,10 @@ If the scan contains multiple vessels, use a seed point to isolate the aneurysm.
 | `--ls-propagation` | `1.0` | Level-set propagation scaling |
 | `--reduce-mesh` | `0.0` | Fraction of triangles to remove (0.0–1.0) |
 | `--increase-mesh` | `0` | Number of Loop subdivision passes |
+| `--isolate` | `False` | Trim to the aneurysm after meshing (requires `--seed-ijk`) |
+| `--diameters` | `5` | With `--isolate`: vessel kept past the aneurysm, in parent diameters |
+| `--scaffold` | auto | With `--isolate`: fix the working-region size in mm instead of sizing it from the data |
+| `--sphere` | `2.5` | With `--isolate`: cut localisation radius, in vessel radii |
 | `--centerlines` | `False` | Compute vessel centerlines |
 | `--flow-extensions` | `False` | Add flow extensions and capping (requires `--centerlines`) |
 | `--flow-ext-ratio` | `5.0` | Ratio of extension length to vessel radius |
@@ -496,6 +551,17 @@ If the scan contains multiple vessels, use a seed point to isolate the aneurysm.
 |---|---|---|
 | `input_stl` | (Required) | Path to the STL file to check |
 | `--deep` | `False` | Also run self-intersection detection (slow) |
+
+### `isolate` (STL to Isolated STL)
+
+| Argument | Default | Description |
+|---|---|---|
+| `input_stl` | (Required) | Path to the segmented STL |
+| `--seed-mm` | (Required) | Point inside the aneurysm dome, `x,y,z` in mm |
+| `--output`, `-o` | `isolated.stl` | Output STL path |
+| `--diameters` | `5` | Vessel kept past the aneurysm, in parent diameters |
+| `--scaffold` | auto | Fix the working-region size in mm instead of sizing it from the data |
+| `--sphere` | `2.5` | Cut localisation radius, in vessel radii |
 
 ### `process-mesh` (STL to Capped STL)
 
@@ -596,3 +662,5 @@ Then define boundary conditions in `0/U`, `0/p`, etc. using those patch names.
 - **Missing vmtk**: Ensure you used `setup.sh`. Do NOT `pip install vtk` manually.
 - **X11 Errors**: Use `./run-cli.sh` which forces offscreen rendering.
 - **Bone Leaking**: Increase `--lower-threshold` (e.g., to 250) or use `--seed-ijk`.
+- **"Two vessels share one hole" warning**: the segmentation merged two touching vessels (common between parallel A2s, or a vessel and the dome with no wall between them). `centerlines` treats them as one, so one vessel gets no flow extension and `clip-sac` can fail to find the dome. Re-segment with a different HU range — `sample-hu` helps pick one.
+- **`isolate` reports untrimmed vessels**: a vessel reached the edge of the working region before its trim length, or could not be separated without cutting the dome. Check it in MeshLab; `--scaffold` with a larger value helps the first case if no bone is nearby.
