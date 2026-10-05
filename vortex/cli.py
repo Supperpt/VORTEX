@@ -21,6 +21,7 @@ from rich.prompt import Prompt, Confirm
 from rich import print as rprint
 from rich import box
 
+from vortex import __version__
 from vortex.utils.logging_config import setup_logging, get_logger
 from vortex.state.app_state import PipelineParams, IsolateParams
 from vortex.pipeline.dicom_loader import list_series, load_series
@@ -1771,6 +1772,9 @@ def do_shell():
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="VORTEX Aneurysm — CFD-ready 3D model generator from DICOM images."
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"VORTEX {__version__}"
     )
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
