@@ -163,32 +163,14 @@ if errors:
 print("\nAll imports OK.")
 PYEOF
 
-# ---------------------------------------------------------------------------
-# Write run.sh to use the conda env
-# ---------------------------------------------------------------------------
-cat > "$SCRIPT_DIR/run.sh" <<RUNEOF
-#!/usr/bin/env bash
-# VORTEX Aneurysm — launcher
-set -e
-
-SCRIPT_DIR="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
-
-# Fix: force XCB platform on Fedora/Wayland
-export QT_QPA_PLATFORM="\${QT_QPA_PLATFORM:-xcb}"
-export QT_LOGGING_RULES="*.debug=false;qt.qpa.*=false"
-
-cd "\$SCRIPT_DIR"
-conda run -n ${ENV_NAME} python -m vortex.main "\$@"
-RUNEOF
-chmod +x "$SCRIPT_DIR/run.sh"
-
 echo ""
 echo "========================================"
 echo "  Setup complete!"
 echo ""
-echo "  Launch the app with:  bash run.sh"
+echo "  Launch the interactive shell with:"
+echo "    ./run-cli.sh shell"
 echo ""
 echo "  Or activate the env manually:"
 echo "    conda activate ${ENV_NAME}"
-echo "    python -m vortex.main"
+echo "    python -m vortex.cli shell"
 echo "========================================"

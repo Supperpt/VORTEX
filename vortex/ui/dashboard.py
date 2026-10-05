@@ -5,8 +5,9 @@ Pure `rich` renderables that turn the command-by-command REPL (`vortex/cli.py`
 pipeline state-machine panel with a "you are here" marker, and a data-driven
 ASCII bulge-heatmap panel for the `clip-sac` tune-and-look loop.
 
-CLI-native on purpose — no GL/Qt/X11. See `UI_UX_development/README.md`
-(Approach B / "Polished TUI") for the authoritative spec.
+CLI-native on purpose — no GL/Qt/X11. (The original wireframes in
+`UI_UX_development/` were dropped from the repository with the 1.0.0 release;
+they remain in git history.)
 
 The render functions read live `Session` state but never mutate it, so they are
 safe to call once per shell turn and easy to unit-test against a stub session.
