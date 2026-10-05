@@ -97,6 +97,10 @@ def _has_caps(session) -> bool:
         return False
 
 
+def _has_isolated(session) -> bool:
+    return getattr(session, "pre_isolation_surface", None) is not None
+
+
 def _has_sac(session) -> bool:
     return getattr(session, "sac_surface", None) is not None
 
@@ -114,6 +118,12 @@ def current_step(session) -> str:
         return "segment"
     if _has_mask(session) and not _has_surface(session):
         return "mesh"
+    # Straight after 'mesh' the tree is untrimmed: point at 'isolate', the
+    # in-app alternative to editing externally. A 'load-mesh' surface is
+    # usually already edited and goes straight to centerlines.
+    if (getattr(session, "surface_source", None) == "mesh"
+            and not _has_isolated(session) and not _has_centerlines(session)):
+        return "isolate"
     if not _has_centerlines(session):
         return "centerlines"
     if not _has_caps(session):
@@ -136,6 +146,8 @@ def _completed_steps(session) -> set:
         done.add("segment")
     if _has_surface(session):
         done.add("mesh")
+    if _has_isolated(session):
+        done.add("isolate")
     if _has_centerlines(session):
         done.add("centerlines")
     if _has_caps(session):
@@ -272,8 +284,9 @@ def _pipeline_lines():
         [("load", "step"), (f" {g['sep']} ", "sep"), ("seed", "step"),
          (f" {g['sep']} ", "sep"), ("segment", "step"),
          (f" {g['sep']} ", "sep"), ("mesh", "step")],
-        [("   ", "plain"), (g["detour"], "sep"), (" ", "plain"),
-         ("[edit ext.]", "ext"), (f" {g['arrow']} ", "sep"), ("load-mesh", "step")],
+        [("   ", "plain"), (g["detour"], "sep"), (" ", "plain"), ("isolate", "step"),
+         (" or ", "sep"), ("[edit ext.]", "ext"), (f" {g['arrow']} ", "sep"),
+         ("load-mesh", "step")],
         [("centerlines", "step"), (f" {g['sep']} ", "sep"), ("extend", "step"),
          (f" {g['sep']} ", "sep"), ("set-seed", "step")],
         [("clip-sac", "step"), (f" {g['sep']} ", "sep"), ("check", "step"),

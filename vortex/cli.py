@@ -59,6 +59,7 @@ class Session:
         self.seed_mm: Optional[tuple] = None  # (x,y,z) mm — set by set-seed or DICOM seed
         self.clip_sac_view: Optional[dict] = None  # cached clip-sac context for the dashboard panel
         self.pre_isolation_surface: Any = None     # stashed by 'isolate' for --undo
+        self.surface_source: Optional[str] = None  # "mesh" or "load-mesh"; drives the dashboard hint
         self.isolation_info: Optional[dict] = None # cached 'isolate' report context
         self.isolation_centerlines: Any = None     # reusable across 'isolate' re-runs
         self.params: PipelineParams = PipelineParams()
@@ -131,6 +132,37 @@ def display_series_table(folder: str):
 
     console.print(table)
     return series
+
+def pause_to_read() -> None:
+    """Hold the screen until Enter: the dashboard clears it on the next turn,
+    so an error printed just before would otherwise vanish unread."""
+    try:
+        console.input("\n[vortex.dim]Press Enter to continue...[/vortex.dim]")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
+def forget_isolation(session) -> None:
+    """Drop isolate's saved state once the surface it describes is gone, so a
+    later 'isolate --undo' cannot bring back a surface from an earlier mesh."""
+    session.pre_isolation_surface = None
+    session.isolation_info = None
+    session.isolation_centerlines = None
+
+
+def confirm_output_dir(path: str):
+    """-> the path with ~ expanded, or None if the user declined to create a
+    missing directory. A trailing separator means the path is the directory."""
+    path = os.path.expanduser(path)
+    folder = path if path.endswith(("/", os.sep)) else os.path.dirname(path)
+    if folder and not os.path.isdir(folder):
+        if not Confirm.ask(f"[yellow]Directory {folder} does not exist.[/yellow] Create it?",
+                           default=True):
+            console.print("[dim]Export cancelled.[/dim]")
+            return None
+        os.makedirs(folder, exist_ok=True)
+    return path
+
 
 def run_pipeline_step(step_name: str, func, *args, **kwargs):
     """Run a pipeline function with a live status spinner."""
@@ -781,6 +813,8 @@ def do_shell():
                     session.neck_plane    = None
                     session.cap_labels    = {}
                     session.clip_sac_view = None
+                    forget_isolation(session)
+                    session.surface_source = None
                     if scope == "all":
                         session.sitk_image = None
                         session.folder     = None
@@ -832,6 +866,8 @@ def do_shell():
                     session.final_surface = loaded
                     session.centerlines   = None
                     session.profiles      = None
+                    forget_isolation(session)
+                    session.surface_source = "load-mesh"
                     n_pts   = loaded.GetNumberOfPoints()
                     n_cells = loaded.GetNumberOfCells()
                     console.print(
@@ -881,6 +917,14 @@ def do_shell():
             elif cmd == "segment":
                 if session.sitk_image is None:
                     console.print("[red]No image loaded.[/red]")
+                    pause_to_read()
+                elif not session.params.seed_point_ijk:
+                    console.print(
+                        "[red]No seed point — segmentation needs one.[/red]\n"
+                        "[dim]Run 'seed' to pick a point inside the aneurysm on the DICOM "
+                        "slices. ('set-seed X Y Z' is for meshes loaded with 'load-mesh', "
+                        "not for segmentation.)[/dim]")
+                    pause_to_read()
                 else:
                     session.vtk_image = run_pipeline_step("Segmentation", segment, session.sitk_image, session.params)
 
@@ -890,6 +934,8 @@ def do_shell():
                 else:
                     session.surface = run_pipeline_step("Meshing", generate_mesh, session.vtk_image, session.params)
                     session.final_surface = session.surface
+                    forget_isolation(session)
+                    session.surface_source = "mesh"
 
             elif cmd == "isolate":
                 _tok = parts[1:]
@@ -911,6 +957,7 @@ def do_shell():
 
                 if session.surface is None:
                     console.print("[red]Run 'mesh' or 'load-mesh' first.[/red]")
+                    pause_to_read()
                     continue
 
                 # Flags persist into isolate_params, the way clip-sac --ratio does,
@@ -925,6 +972,7 @@ def do_shell():
                             _new = float(_tok[_tok.index(_flag) + 1])
                         except (IndexError, ValueError):
                             console.print(f"[red]Usage: isolate [{_flag} N][/red]")
+                            pause_to_read()
                             _bad = True
                             break
                         # Centerlines are computed on the scaffold, so a different
@@ -950,6 +998,7 @@ def do_shell():
                         "  • 'set-seed X Y Z'   — type coordinates from MeshLab / Meshmixer\n"
                         "  • 'seed'             — DICOM slice picker (requires DICOM loaded)[/dim]"
                     )
+                    pause_to_read()
                     continue
 
                 _before = session.surface
@@ -960,6 +1009,7 @@ def do_shell():
                         session.isolation_centerlines)
                 except Exception as e:
                     console.print(f"[red]Isolation failed:[/red] {e}")
+                    pause_to_read()
                     continue
 
                 session.pre_isolation_surface = _before
@@ -1485,7 +1535,9 @@ def do_shell():
                 if session.final_surface is None:
                     console.print("[red]Nothing to export.[/red]")
                 else:
-                    path = parts[1] if len(parts) > 1 else "output.stl"
+                    path = confirm_output_dir(parts[1] if len(parts) > 1 else "output.stl")
+                    if path is None:
+                        continue
                     out_path = run_pipeline_step("Exporting STL", export_stl,
                                       session.final_surface, path, session.params,
                                       sac_surface=session.sac_surface,
@@ -1507,7 +1559,9 @@ def do_shell():
                 if session.vtk_image is None:
                     console.print("[red]Run 'segment' first to generate a mask.[/red]")
                 else:
-                    path = parts[1] if len(parts) > 1 else "segmentation_mask.nii.gz"
+                    path = confirm_output_dir(parts[1] if len(parts) > 1 else "segmentation_mask.nii.gz")
+                    if path is None:
+                        continue
                     
                     def _export_mask_step(vtk_img, p, cb=None):
                         import SimpleITK as sitk
@@ -1578,14 +1632,12 @@ def do_shell():
 
             else:
                 console.print(f"[red]Unknown command:[/red] {cmd}")
+                pause_to_read()
 
             # The dashboard clears the screen on the next loop turn. Pause after
             # commands whose output is a report/table so it can actually be read.
             if cmd in REPORT_COMMANDS:
-                try:
-                    console.input("\n[vortex.dim]Press Enter to continue...[/vortex.dim]")
-                except (EOFError, KeyboardInterrupt):
-                    pass
+                pause_to_read()
 
         except KeyboardInterrupt:
             continue
@@ -1593,6 +1645,7 @@ def do_shell():
             break
         except Exception as e:
             console.print(f"[bold red]Error:[/bold red] {e}")
+            pause_to_read()
 
     console.print("\n[blue]Exiting VORTEX Shell.[/blue]")
 
