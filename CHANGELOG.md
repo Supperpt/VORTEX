@@ -5,7 +5,7 @@ All notable changes to VORTEX are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] — 2026-10-16
 
 ### Added
 - `isolate`: automatically trims a segmented vessel tree to the aneurysm plus
@@ -75,4 +75,5 @@ First public release.
   experimental PyQt5 GUI application was removed from the release; the tested,
   headless-friendly CLI/shell is the supported workflow.
 
+[1.1.0]: https://github.com/Supperpt/VORTEX/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Supperpt/VORTEX/releases/tag/v1.0.0
