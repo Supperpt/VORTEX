@@ -72,7 +72,14 @@ def add_flow_extensions(
     flow_ext.AdaptiveExtensionLength      = 1
     flow_ext.AdaptiveExtensionRatio       = params.flow_ext_ratio
     flow_ext.ExtensionMode                = "centerlinedirection"  # stable; boundarynormal can explode mesh
-    flow_ext.AdaptiveNumberOfBoundaryPoints = 0  # don't subdivide the extension cylinder mesh
+    # Derive each extension ring's point count from the rim it attaches to.
+    # With this at 0, VMTK pins TargetNumberOfBoundaryPoints (default 50) on every
+    # ring regardless of vessel size, so the smaller the opening the finer the
+    # extension: AA_002's 2.3 mm outlet got 0.046 mm spacing against a 0.2 mm
+    # remesh target. That inflated the exported surface ~2x (AA_002: 39,364 ->
+    # 18,110 triangles) for no accuracy gain. Triangle *quality* is unaffected
+    # either way -- the extension slivers are unchanged. See #10.
+    flow_ext.AdaptiveNumberOfBoundaryPoints = 1
     flow_ext.Interactive                  = 0
     flow_ext.Execute()
 

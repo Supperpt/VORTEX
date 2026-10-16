@@ -28,7 +28,8 @@ See [README.md](README.md) for the full workflow and command reference.
 
 - **`main`** — stable, released code. This is what tagged releases come from.
 - **`in_developement`** — work in progress; may be untested. Internal
-  implementation notes (`LLM.md`) live here, not on `main`.
+  implementation notes (`LLM.md`) are kept locally by the maintainer and are not
+  tracked on any branch.
 
 Please base pull requests on `main` and keep them focused.
 

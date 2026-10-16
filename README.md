@@ -8,7 +8,7 @@
 **Cerebral aneurysm 3D model pipeline — DICOM → STL for CFD/FSI/3D printing**
 
 VORTEX (Vascular Output & Real-time Thresholding EXtraction) is a tool for processing angio-CT or angio-MR DICOM images into high-quality STL meshes. It is designed to produce watertight models ready for OpenFOAM rigid-wall CFD, FSI simulations, or 3D printing.
-It is designed to be used in GNU/Linux systems. It has not been tested in MacOS/Windows.
+It is designed to be used in GNU/Linux systems. Windows 11 users can run it via WSL2 (see [Windows 11 Installation](#windows-11-installation-via-wsl2) below).
 
 VORTEX is driven entirely through a command-line interface and a stateful
 interactive shell (TUI); there is no separate graphical application to install.
@@ -20,7 +20,9 @@ interactive shell (TUI); there is no separate graphical application to install.
 
 ## Installation
 
-### 1. Install Miniforge3 (Required)
+### Linux
+
+#### 1. Install Miniforge3 (Required)
 The `vmtk` library is only available via conda-forge for modern Python versions.
 
 ```bash
@@ -29,11 +31,65 @@ bash Miniforge3.sh
 source ~/.bashrc
 ```
 
-### 2. Run Setup
+#### 2. Run Setup
 ```bash
 bash setup.sh
 ```
 This script creates the `vortex-aneurysm` conda environment and installs all dependencies (vmtk, SimpleITK, etc.).
+
+---
+
+### Windows 11 Installation (via WSL2)
+
+VORTEX does not run natively on Windows. Windows 11 users should use **WSL2** (Windows Subsystem for Linux), which provides a full Linux environment including GUI support (WSLg is built into Windows 11 — no extra installation needed).
+
+#### 1. Enable WSL2
+
+Open **PowerShell as Administrator** and run:
+
+```powershell
+wsl --install
+```
+
+This installs Ubuntu by default. Restart your machine when prompted.
+
+#### 2. Open Ubuntu
+
+Launch **Ubuntu** from the Start Menu. You now have a Linux terminal.
+
+#### 3. Install Miniforge3
+
+Inside the Ubuntu terminal:
+
+```bash
+curl -L https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -o Miniforge3.sh
+bash Miniforge3.sh
+source ~/.bashrc
+```
+
+#### 4. Clone VORTEX into the WSL2 filesystem
+
+Store the project inside WSL2 (not on the Windows drive) for best performance:
+
+```bash
+cd ~
+git clone <repository-url>
+cd VORTEX
+```
+
+#### 5. Run Setup
+
+```bash
+bash setup.sh
+```
+
+#### 6. Launch
+
+```bash
+./run-cli.sh shell
+```
+
+**Accessing Windows files from WSL2:** Your Windows drives are mounted at `/mnt/c/`, `/mnt/d/`, etc. For example, DICOM data at `C:\Users\Name\DICOMs` is accessible as `/mnt/c/Users/Name/DICOMs` inside VORTEX.
 
 ---
 
@@ -67,20 +123,76 @@ mesh                    ← Marching Cubes + smoothing → surface mesh
 export raw_vessel.stl   ← save for external editing
 ```
 
-### Phase 2 — External Editing (MeshLab / Meshmixer / 3D Slicer)
+### Phase 2 — Sectioning the vessel
 
-Open `raw_vessel.stl` in your preferred tool and:
+**Try `isolate` first.** It uses the seed to trim the mesh down to the aneurysm
+plus a set length of every vessel attached to it, cutting each one square to its
+own centerline. That replaces the manual sectioning step for most cases. Right
+after `mesh`, the pipeline panel points at it (`└→ isolate or [edit ext.]`).
+
+```
+isolate                  ← trim to the aneurysm + 5 vessel diameters (default)
+isolate --diameters 3    ← keep less vessel
+isolate --scaffold 15    ← pin the working region by hand instead of auto-sizing
+isolate --undo           ← put the previous surface back
+check                    ← confirm one region, and one opening per cut
+```
+
+How it decides where to cut:
+
+- **Length is measured per vessel, from where it leaves the aneurysm.** Every
+  vessel keeps N diameters past the dome — parent and daughters alike — rather
+  than N diameters from one point at the neck. (If it cannot find the dome, it
+  says so and measures from the neck instead.)
+- **The diameter is the parent's**: the widest vessel at the aneurysm, measured
+  where its width is steady, past the bulge at the junction. On anterior
+  communicating aneurysms that is the A1, not the thin communicating segment.
+- **Each vessel gets its own cut**, kept clear of neighbouring vessels and of
+  the dome. Where two vessels touch further along (e.g. two A2s side by side),
+  one cut may have to take both; where a vessel cannot be separated without
+  cutting the dome, it is left untrimmed and reported.
+
+`isolate` sizes its own working region around the seed, growing it only while
+the surface inside still looks like vessel. That matters near the skull base:
+on the two anterior communicating artery cases tested, going from a 12 mm to a
+15 mm region pulled in bone, quadrupled the triangle count and made the vessel
+measure 9 mm instead of 2 mm. Since the measured diameter sets the trim
+distance, one bad measurement corrupts everything after it. The reported
+diameter is the number to sanity-check: a cerebral artery should read roughly
+1.5-4 mm. If it does not, the region has taken in bone, and `--scaffold` with a
+smaller value is the fix.
+
+**Read the warnings.** `isolate` reports any opening it did not make itself — a
+vessel that ran out of the working region, or one it could not separate — so
+you can check it before `centerlines`. If it shows a **⚠ WARNING** panel about
+two vessels sharing one opening, the segmentation has merged two touching
+vessels into one hole: `centerlines` will see one vessel instead of two and
+`clip-sac` can fail. Re-segment with a different HU range (see `sample-hu`).
+The panel stays in the dashboard until the surface changes.
+
+Settings live in `isolate-params`, separate from `params`. Note `roi_radius` in
+`params` is a *segmentation* setting and has nothing to do with the region
+`isolate` works in.
+
+**What `isolate` cannot do: remove bone that is fused to the vessel.** It trims
+the vascular tree; where bone touches the lumen the two are one connected
+surface and no amount of geometry separates them. It warns when it detects
+this. Those cases still need external editing, and so do unusual geometries
+where the automatic cut lands badly.
+
+**External editing (MeshLab / Meshmixer / 3D Slicer)** — the fallback. Open
+`raw_vessel.stl` and:
 - Remove bone and non-vascular structures
 - Section the vessel at clean, planar cut planes
 - Fix any mesh defects (non-manifold edges, holes)
 
-Save the result (e.g. `edited_vessel.stl`).
+Save the result (e.g. `edited_vessel.stl`) and carry on with `load-mesh`.
 
 ### Phase 3 — CFD Preparation (back in VORTEX)
 
 ```
 load-mesh "edited_vessel.stl"   ← re-import the cleaned mesh
-remesh                          ← smooth + uniformly remesh for CFD quality (recommended; before centerlines)
+remesh                          ← smooth + curvature-adaptive remesh for CFD quality (recommended; before centerlines)
 centerlines                     ← compute vessel centrelines
 extend                          ← add flow extensions + cap all openings
 set-seed X Y Z                  ← type the dome coordinate (get it from MeshLab/Meshmixer)
@@ -105,20 +217,28 @@ This produces, in the export directory (bare names, matching vortex-cfd's defaul
 
 #### Tuning the `remesh` parameters
 
-`remesh` is controlled by two `params` values. The goal is **uniform** triangles
-that still resolve the geometry — uniformity (not small size) is what removes the
-downstream snappyHexMesh skewness.
+`remesh` sizes triangles **by local curvature**: flat parent vessel gets coarse
+triangles, while the dome, blebs and neck — where curvature is high and CFD
+accuracy matters — keep fine ones. What removes downstream snappyHexMesh skewness
+is *regular, well-shaped* triangles, not uniformly tiny ones, and adaptive sizing
+buys that at a fraction of the triangle count.
 
-**`remesh_edge_length`** (mm, key `edge`, default `0.25`, `0` = skip remeshing) —
-target uniform triangle edge length.
-- **Smaller** (e.g. `0.15`) → finer surface, more triangles, better curvature
-  capture on small domes/blebs; but larger STL, slower remesh, heavier CFD mesh.
-- **Larger** (e.g. `0.4–0.5`) → fewer triangles, faster; but if it exceeds the
-  local curvature scale it under-resolves the surface and **re-introduces skew**.
-- Rule of thumb: keep it **≤ the CFD near-wall cell size** (vortex-cfd refines to
-  ~0.125 mm at the wall), so snappyHexMesh has a smooth surface to snap to. For
-  ICA parent vessels (~3–5 mm Ø) `0.2–0.3 mm` works well; drop to `0.15–0.2 mm`
-  for small/complex domes, raise toward `0.4 mm` to keep cell counts down.
+**`remesh_edge_length`** (mm, key `edge`, default `0.5`, `0` = skip remeshing) —
+the **coarsest** edge, used on flat regions.
+- **Larger** (e.g. `0.6`) → fewer triangles, lighter CFD mesh; but if it exceeds
+  the local curvature scale on the flat regions it under-resolves them.
+- **Smaller** (e.g. `0.4`) → more triangles, closer to uniform behaviour.
+
+**`remesh_min_edge_length`** (mm, key `min_edge`, default `0.2`) — the **finest**
+edge, used where curvature is highest. Must be `< edge`.
+- Keep it **≤ the CFD near-wall cell size** (vortex-cfd refines to ~0.125 mm at
+  the wall) so snappyHexMesh has a smooth surface to snap to.
+- Drop to `0.15` for small or complex domes with blebs; raising it above `0.25`
+  starts to blur small morphology.
+
+**`remesh_adaptive`** (key `adaptive`, default `true`) — set `false` to fall back
+to uniform sizing at `edge` everywhere (the pre-1.1 behaviour). Useful mainly for
+comparison or if a pathological surface confuses the curvature estimate.
 
 **`remesh_smooth_iterations`** (key `smooth`, default `20`, `0` = skip smoothing) —
 Taubin smoothing passes applied before remeshing (volume-preserving, so the
@@ -133,10 +253,26 @@ aneurysm is not shrunk).
   double-smoothing; keep smoothing **on** for raw external STLs loaded via
   `load-mesh`.
 
-**How to check your choice:** run `check` after `remesh` (uniform triangles, no
-slivers, good aspect ratio), and confirm the downstream OpenFOAM `checkMesh`
-skewness in vortex-cfd. Adjust `edge`/`smooth` and re-run `remesh` (it operates on
-the current surface, so re-run `mesh`/`load-mesh` first if you want a clean start).
+Measured on the bundled `Test.stl` (5,937 triangles, 3 openings):
+
+| Setting | Triangles | Max aspect ratio | Min angle |
+|---|---|---|---|
+| uniform `0.25` (pre-1.1 default) | 17,798 | 2.93 | 13.1° |
+| **adaptive `0.2–0.5` (default)** | **5,914** | **2.58** | **20.5°** |
+| adaptive `0.2–0.6` | 4,732 | 2.37 | 22.2° |
+
+**How to check your choice:** run `check` after `remesh` — it reports triangle
+quality *and* the per-loop boundary radii, so a torn surface (extra tiny loops)
+is visible before `extend` caps them into phantom patches. Then confirm the
+downstream OpenFOAM `checkMesh` skewness in vortex-cfd. `remesh` operates on the
+current surface, so re-run `mesh`/`load-mesh` first if you want a clean start.
+
+To sweep settings without the interactive shell:
+
+```bash
+./run-cli.sh remesh input.stl -o out.stl --edge 0.5 --min-edge 0.2 --check
+./run-cli.sh remesh input.stl -o out.stl --edge 0.25 --uniform --check   # old behaviour
+```
 
 #### How `clip-sac` works
 
@@ -219,7 +355,8 @@ load "/path/to/dicom"
 seed
 segment
 mesh
-centerlines
+isolate                 ← trim to the aneurysm + 5 vessel diameters of parent vessel
+centerlines             ← must run AFTER isolate (isolate creates new openings)
 extend
 export aneurysm.stl
 ```
@@ -234,12 +371,15 @@ export aneurysm.stl
 | `list` | Show the series available in the currently loaded folder. |
 | `seed` | Open the DICOM slice viewer to click the aneurysm. **Requires DICOM loaded.** |
 | `set-seed X Y Z` | Set the seed point from known world coordinates (read from MeshLab or Meshmixer). Works without DICOM. |
+| `sample-hu [radius]` | Sample the lumen HU distribution in a sphere around the seed (default radius 3 mm) and print percentiles (min/p5/median/p95/p99/max) with suggested `lower`/`upper` thresholds. **Requires DICOM + seed.** Pick thresholds from data instead of trial-and-error. |
 | `status` | Show the pipeline dashboard (what is loaded and ready). |
 | `params` | View and edit pipeline parameters (HU thresholds, `roi_radius`, `use_levelset`, `split_patches`, etc.). |
-| `segment` | Segment the DICOM volume using thresholds and the selected seed. |
+| `segment` | Segment the DICOM volume using thresholds and the selected seed. Needs a seed from `seed` (it says so if there is none). |
 | `mesh` | Generate the 3D surface mesh from the segmentation. |
-| `remesh` | Taubin-smooth + uniformly remesh the surface (vmtkSurfaceRemeshing) for CFD-grade triangle quality. Run on the lumen surface **before `centerlines`/`extend`**. Tunable via `remesh_edge_length` / `remesh_smooth_iterations` in `params` — see "Tuning the `remesh` parameters" above. |
-| `centerlines` | Compute vessel centerlines. |
+| `isolate [--diameters N] [--scaffold MM] [--sphere K] [--undo]` | Trim the mesh to the aneurysm plus N parent-vessel diameters of every attached vessel, cutting each one perpendicular to its own centerline. Replaces manual sectioning in MeshLab/Meshmixer for most cases. Run after `mesh`/`load-mesh`. **`centerlines` must be re-run afterwards** — `isolate` creates new openings, and any centerlines computed before it are discarded. Does not remove bone fused to the vessel; it warns instead. Settings live in `isolate-params`. |
+| `isolate-params` | Show and edit the isolation settings. Kept separate from `params`, which stays a segmentation/meshing table. |
+| `remesh` | Taubin-smooth + curvature-adaptively remesh the surface (vmtkSurfaceRemeshing) for CFD-grade triangle quality — fine triangles on the dome, coarse on flat vessel. Run on the lumen surface **before `centerlines`/`extend`**. Tunable via `remesh_edge_length` / `remesh_min_edge_length` / `remesh_adaptive` / `remesh_smooth_iterations` in `params` — see "Tuning the `remesh` parameters" above. |
+| `centerlines` | Compute vessel centerlines. Warns if two vessels share one opening (see Phase 2). |
 | `extend` | Add flow extensions and cap the model. Must run before `clip-sac`. |
 | `metrics` | Calculate morphological metrics for the aneurysm. Works with any seed source. |
 | `clip-sac [--ratio N]` | Split the wall into dome + parent vessel via the centerline bulge field. Writes `sac_bulge_heatmap.ply` and prints field stats; tune the split with `--ratio`. Run after `extend`. |
@@ -247,11 +387,13 @@ export aneurysm.stl
 | `cap_label` | Label each cap as inlet/outlet (`i`/`o`) so export writes `inlet.stl` / `outlet_N.stl`. Run after `extend`. |
 | `check` | Check mesh quality: manifold edges, open boundary loops, triangle quality, normal consistency. |
 | `check --deep` | Same as `check`, plus self-intersection detection (slow). |
-| `export <file>` | Save the final STL (and split patches if `split_patches = True`). Defaults to `output.stl`. |
+| `export <file>` | Save the final STL (and split patches if `split_patches = True`). Defaults to `output.stl`. Asks before creating a directory that does not exist. |
 | `export-mask <file.nii.gz>` | Export the segmentation mask (NIfTI format) for AI or radiomics. |
 
 **Where does the output go?**
-By default, `export <filename.stl>` saves to your **current working directory**. Provide a full path to save elsewhere: `export /home/user/Desktop/final.stl`.
+By default, `export <filename.stl>` saves to your **current working directory**. Provide a full path to save elsewhere: `export /home/user/Desktop/final.stl`. `~` works too: `export ~/Desktop/final.stl`.
+
+**Errors stay on screen.** The dashboard redraws after every command; when a command fails, VORTEX waits for Enter so the message can be read first.
 
 ---
 
@@ -264,6 +406,14 @@ Scan a folder to find available series and their UIDs.
 ```bash
 ./run-cli.sh list-series /path/to/dicom/folder
 ```
+
+### Sample Lumen HU (pick thresholds from data)
+Print the HU distribution in a sphere around the seed so you can choose `--lower-threshold`/`--upper-threshold` from real values instead of trial-and-error.
+```bash
+./run-cli.sh sample-hu /path/to/dicom/folder --seed-ijk 256,256,120
+./run-cli.sh sample-hu /path/to/dicom/folder --seed-mm 12.3,-4.5,67.8 --radius 5
+```
+Reports min/p5/median/mean/p95/p99/max and suggests `upper ≈ p99 + 10%`, `lower ≈ p5`. (Same as the `sample-hu` shell command, which uses the already-loaded seed.)
 
 ### Generate a 3D Model (Basic)
 Process the largest series in the folder with default settings (150–400 HU).
@@ -284,10 +434,44 @@ Add `--deep` to also run self-intersection detection (slow on large meshes):
 
 Reports:
 - **Non-manifold edges** — CFD mesher will fail if any are found
-- **Open boundary loops** — count of vessel openings (≥2 expected before `extend`)
+- **Open boundary loops** — count of vessel openings (≥2 expected before `extend`),
+  plus each loop's radius. Loops far smaller than the largest are flagged as
+  suspected **tears**: `extend` would cap each one and `cap_label` would then
+  demand a label for every phantom cap.
 - **Aspect ratio** (mean/max) and **min triangle angle**
 - **Normal consistency** — detects incorrectly oriented faces
 - **Self-intersections** (with `--deep` only)
+
+### Remesh an STL for CFD
+Improve triangle quality without an interactive session — useful for sweeping
+settings or preparing a batch of cases.
+```bash
+./run-cli.sh remesh input.stl -o remeshed.stl --check
+./run-cli.sh remesh input.stl -o remeshed.stl --edge 0.6 --min-edge 0.15 --smooth 0
+```
+
+| Flag | Meaning |
+|---|---|
+| `--edge MM` | Coarsest triangle edge, on flat vessel (default `0.5`) |
+| `--min-edge MM` | Finest triangle edge, where curvature is high (default `0.2`) |
+| `--smooth N` | Taubin smoothing iterations, `0` to skip (default `20`) |
+| `--uniform` | Disable curvature adaptation; use `--edge` everywhere |
+| `--check` | Print a mesh quality report on the result |
+
+### Isolate the Aneurysm in an STL
+Trim a segmented STL to the aneurysm plus N vessel diameters — the same as the
+shell's `isolate`, with the same report and warnings. The seed is a point inside
+the dome, in mm (e.g. picked in MeshLab).
+```bash
+./run-cli.sh isolate raw_vessel.stl --seed-mm=-9.6,-44.8,288.5 -o isolated.stl
+./run-cli.sh isolate raw_vessel.stl --seed-mm=-9.6,-44.8,288.5 -o isolated.stl --diameters 3
+```
+Write `--seed-mm=` with an equals sign when the first coordinate is negative;
+otherwise the value is read as another option and the command stops with
+"expected one argument". (The same applies to `sample-hu --seed-mm`.)
+Then run `process-mesh` on the result for centerlines, flow extensions and caps.
+Give the seed with full precision when you have it: on one test case, rounding it
+by 0.05 mm changed which working region the centerlines succeeded in.
 
 ### Process an Existing STL Mesh
 Apply centerlines, flow extensions, and watertight capping to an already segmented STL.
@@ -302,6 +486,17 @@ Includes centerlines, flow extensions, and watertight capping from DICOM.
     --centerlines \
     --flow-extensions \
     --flow-ext-ratio 5.0 \
+    --output aneurysm_cfd.stl
+```
+
+### Full Pipeline with Isolation
+Add `--isolate` to trim to the aneurysm after meshing, before centerlines. It
+needs the seed (`--seed-ijk`, e.g. from `seed-picker`).
+```bash
+./run-cli.sh process /path/to/dicom/folder \
+    --seed-ijk 235,186,424 --roi-radius 20 \
+    --isolate \
+    --centerlines --flow-extensions \
     --output aneurysm_cfd.stl
 ```
 
@@ -350,6 +545,10 @@ If the scan contains multiple vessels, use a seed point to isolate the aneurysm.
 | `--ls-propagation` | `1.0` | Level-set propagation scaling |
 | `--reduce-mesh` | `0.0` | Fraction of triangles to remove (0.0–1.0) |
 | `--increase-mesh` | `0` | Number of Loop subdivision passes |
+| `--isolate` | `False` | Trim to the aneurysm after meshing (requires `--seed-ijk`) |
+| `--diameters` | `5` | With `--isolate`: vessel kept past the aneurysm, in parent diameters |
+| `--scaffold` | auto | With `--isolate`: fix the working-region size in mm instead of sizing it from the data |
+| `--sphere` | `2.5` | With `--isolate`: cut localisation radius, in vessel radii |
 | `--centerlines` | `False` | Compute vessel centerlines |
 | `--flow-extensions` | `False` | Add flow extensions and capping (requires `--centerlines`) |
 | `--flow-ext-ratio` | `5.0` | Ratio of extension length to vessel radius |
@@ -363,6 +562,17 @@ If the scan contains multiple vessels, use a seed point to isolate the aneurysm.
 |---|---|---|
 | `input_stl` | (Required) | Path to the STL file to check |
 | `--deep` | `False` | Also run self-intersection detection (slow) |
+
+### `isolate` (STL to Isolated STL)
+
+| Argument | Default | Description |
+|---|---|---|
+| `input_stl` | (Required) | Path to the segmented STL |
+| `--seed-mm` | (Required) | Point inside the aneurysm dome, `x,y,z` in mm |
+| `--output`, `-o` | `isolated.stl` | Output STL path |
+| `--diameters` | `5` | Vessel kept past the aneurysm, in parent diameters |
+| `--scaffold` | auto | Fix the working-region size in mm instead of sizing it from the data |
+| `--sphere` | `2.5` | Cut localisation radius, in vessel radii |
 
 ### `process-mesh` (STL to Capped STL)
 
@@ -387,6 +597,18 @@ If the scan contains multiple vessels, use a seed point to isolate the aneurysm.
 | Argument | Default | Description |
 |---|---|---|
 | `folder` | (Required) | Path to the DICOM folder |
+
+### `sample-hu`
+
+| Argument | Default | Description |
+|---|---|---|
+| `folder` | (Required) | Path to the DICOM folder |
+| `--series-uid` | Largest | Specific SeriesInstanceUID to load |
+| `--seed-ijk` | — | Seed as image index `i,j,k` (e.g. from `seed-picker`) |
+| `--seed-mm` | — | Seed as world coordinates `x,y,z` in mm |
+| `--radius` | `3.0` | Sphere radius in mm |
+
+*(One of `--seed-ijk` / `--seed-mm` is required.)*
 
 ---
 
@@ -451,3 +673,5 @@ Then define boundary conditions in `0/U`, `0/p`, etc. using those patch names.
 - **Missing vmtk**: Ensure you used `setup.sh`. Do NOT `pip install vtk` manually.
 - **X11 Errors**: Use `./run-cli.sh` which forces offscreen rendering.
 - **Bone Leaking**: Increase `--lower-threshold` (e.g., to 250) or use `--seed-ijk`.
+- **"Two vessels share one hole" warning**: the segmentation merged two touching vessels (common between parallel A2s, or a vessel and the dome with no wall between them). `centerlines` treats them as one, so one vessel gets no flow extension and `clip-sac` can fail to find the dome. Re-segment with a different HU range — `sample-hu` helps pick one.
+- **`isolate` reports untrimmed vessels**: a vessel reached the edge of the working region before its trim length, or could not be separated without cutting the dome. Check it in MeshLab; `--scaffold` with a larger value helps the first case if no bone is nearby.

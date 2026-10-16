@@ -31,8 +31,10 @@ class PipelineParams:
     reduce_mesh: float = 0.0         # fraction of triangles to remove (0=none, 1=all)
     increase_mesh: int = 0           # Loop subdivision passes (~4x triangles each)
 
-    # Surface prep (remesh command) — uniform isotropic remeshing + smoothing
-    remesh_edge_length: float = 0.25     # mm — uniform triangle edge length (0=skip). Smaller=finer/heavier; keep <= CFD near-wall cell (~0.125mm). ICA ~0.2-0.3, small domes 0.15-0.2.
+    # Surface prep (remesh command) — curvature-adaptive remeshing + smoothing
+    remesh_adaptive: bool = True         # size triangles by local curvature (False = uniform edge everywhere, the pre-1.1 behaviour)
+    remesh_edge_length: float = 0.5      # mm — COARSEST edge, used on flat parent vessel (0=skip remeshing). Uniform target when remesh_adaptive=False.
+    remesh_min_edge_length: float = 0.2  # mm — FINEST edge, used where curvature is high (dome, blebs, neck). Adaptive mode only; must be < remesh_edge_length.
     remesh_smooth_iterations: int = 20   # Taubin iterations in remesh pass (0=skip). More=less noise but rounds off blebs; set 0 after `mesh` (already smooths 30), keep on for load-mesh STLs.
 
     # Output mode
@@ -62,7 +64,9 @@ class PipelineParams:
             flow_ext_selected=list(self.flow_ext_selected) if self.flow_ext_selected else None,
             reduce_mesh=self.reduce_mesh,
             increase_mesh=self.increase_mesh,
+            remesh_adaptive=self.remesh_adaptive,
             remesh_edge_length=self.remesh_edge_length,
+            remesh_min_edge_length=self.remesh_min_edge_length,
             remesh_smooth_iterations=self.remesh_smooth_iterations,
             build_wall=self.build_wall,
             wall_thickness=self.wall_thickness,
@@ -70,6 +74,64 @@ class PipelineParams:
             split_patches=self.split_patches,
             seed_point_ijk=self.seed_point_ijk,
             sac_bulge_ratio=self.sac_bulge_ratio,
+        )
+
+
+@dataclass
+class IsolateParams:
+    """Parameters for the `isolate` command only.
+
+    Deliberately kept out of PipelineParams. Nothing in the segmentation,
+    meshing or export path reads these, so PipelineParams.copy() -- which
+    lists every field by hand and sits on the path to every worker -- does
+    not need to change, and the existing pipeline cannot regress from a
+    change it never sees. It also keeps the `params` table readable; it is
+    already 18 rows and these belong to a different question.
+
+    Note `roi_radius` on PipelineParams is a *segmentation* setting and has
+    nothing to do with `scaffold_mm` here. They are separate on purpose.
+    """
+
+    # Trim length
+    n_diameters:       float = 5.0   # parent diameters of vessel kept past the neck
+
+    # Scaffold: the working region that makes centerlines possible.
+    # NOT the final trim -- the perpendicular cuts at n_diameters decide that.
+    # 15 mm rather than 10 because the measured requirement across AA_001/002/
+    # 003/009 is 7.6-12.7 mm from the neck, so 10 truncates every one of them.
+    # scaffold_mm is the CAP, not the value used: with scaffold_auto the
+    # region grows only while it still contains vessel alone. A fixed size
+    # cannot work -- too small truncates the trim, too large takes in bone and
+    # the measured "vessel diameter" becomes meaningless, which then sets the
+    # trim distance. Measured on an anterior communicating artery case:
+    # 12 mm -> 2.25 mm diameter, 15 mm -> 8.93 mm, with triangles going
+    # 29,620 -> 109,534 as the skull base entered the box.
+    scaffold_mm:       float = 20.0  # upper bound on the working region
+    scaffold_auto:     bool  = True  # size it from the data; False pins scaffold_mm
+    scaffold_inset_mm: float = 0.6   # inset that turns sealed ends into clean openings
+
+    # Cut geometry
+    cut_sphere_factor: float = 2.5   # cut localisation radius, in measured cross-section radii
+
+    # Cleanup and fallbacks
+    # 1.0 filled real vessel openings of 0.6-1.1 mm radius (AA_009's A1s), so
+    # those vessels got no centerline and were never cut. Slivers from the
+    # scaffold inset measure under 0.45 mm.
+    tear_radius_mm:    float = 0.3   # openings below this are filled as tears
+    decimate_target:   float = 0.7   # decimation before the network fallback only
+    anchor_retract:    bool  = True  # walk off a sac-intruding branch, network engine only
+
+    def copy(self) -> "IsolateParams":
+        """Return a copy — safe to hand to a worker without sharing refs."""
+        return IsolateParams(
+            n_diameters=self.n_diameters,
+            scaffold_mm=self.scaffold_mm,
+            scaffold_auto=self.scaffold_auto,
+            scaffold_inset_mm=self.scaffold_inset_mm,
+            cut_sphere_factor=self.cut_sphere_factor,
+            tear_radius_mm=self.tear_radius_mm,
+            decimate_target=self.decimate_target,
+            anchor_retract=self.anchor_retract,
         )
 
 

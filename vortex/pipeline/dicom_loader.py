@@ -166,6 +166,74 @@ def image_to_numpy(sitk_image: sitk.Image) -> np.ndarray:
     return sitk.GetArrayViewFromImage(sitk_image)
 
 
+def sample_hu_sphere(sitk_image: sitk.Image, seed_mm: tuple,
+                     radius_mm: float = 3.0) -> Optional[dict]:
+    """Sample Hounsfield Unit values inside a physical sphere around *seed_mm*.
+
+    Used by the 'sample-hu' shell command so the user can pick lower/upper HU
+    thresholds from the real lumen intensity distribution instead of guessing.
+
+    The sphere is built using physical (mm) distances weighted by the image
+    spacing, so it stays isotropic even on anisotropic voxels. *sitk_image* must
+    be the raw HU volume (before threshold/resample), which is what the pipeline
+    keeps in session.sitk_image.
+
+    Parameters
+    ----------
+    sitk_image : raw HU volume
+    seed_mm    : (x, y, z) world coordinate, expected inside the vessel lumen
+    radius_mm  : sphere radius in mm (default 3.0)
+
+    Returns
+    -------
+    dict with count, radius_mm and HU percentiles (min/p5/median/mean/p95/p99/max),
+    or None if the seed falls outside the image or the sphere captures no voxels.
+    """
+    size = sitk_image.GetSize()            # (nx, ny, nz)
+    seed_ijk = sitk_image.TransformPhysicalPointToIndex(
+        (float(seed_mm[0]), float(seed_mm[1]), float(seed_mm[2]))
+    )
+    if not all(0 <= seed_ijk[a] < size[a] for a in range(3)):
+        return None  # seed is outside the volume
+
+    arr = sitk.GetArrayViewFromImage(sitk_image)   # (z, y, x)
+    spacing = sitk_image.GetSpacing()              # (sx, sy, sz)
+
+    # Radius in voxels per axis (ceil so the sphere is fully covered).
+    ri = [int(np.ceil(radius_mm / s)) for s in spacing]   # (rx, ry, rz)
+    i0, j0, k0 = seed_ijk                                  # (x, y, z) indices
+    x_lo, x_hi = max(0, i0 - ri[0]), min(size[0] - 1, i0 + ri[0])
+    y_lo, y_hi = max(0, j0 - ri[1]), min(size[1] - 1, j0 + ri[1])
+    z_lo, z_hi = max(0, k0 - ri[2]), min(size[2] - 1, k0 + ri[2])
+
+    # Sub-block in numpy (z, y, x) order.
+    sub = arr[z_lo:z_hi + 1, y_lo:y_hi + 1, x_lo:x_hi + 1]
+
+    # Physical-distance spherical mask: offset of each voxel from the seed, in mm.
+    zz, yy, xx = np.mgrid[z_lo:z_hi + 1, y_lo:y_hi + 1, x_lo:x_hi + 1]
+    dx = (xx - i0) * spacing[0]
+    dy = (yy - j0) * spacing[1]
+    dz = (zz - k0) * spacing[2]
+    mask = (dx * dx + dy * dy + dz * dz) <= radius_mm * radius_mm
+
+    vals = np.asarray(sub[mask], dtype=np.float64)
+    if vals.size == 0:
+        return None
+
+    p = np.percentile(vals, [5, 50, 95, 99])
+    return {
+        "count":     int(vals.size),
+        "radius_mm": float(radius_mm),
+        "min":       float(vals.min()),
+        "p5":        float(p[0]),
+        "median":    float(p[1]),
+        "mean":      float(vals.mean()),
+        "p95":       float(p[2]),
+        "p99":       float(p[3]),
+        "max":       float(vals.max()),
+    }
+
+
 def resample_image(sitk_image: sitk.Image, factor: float) -> sitk.Image:
     """Isotropically upsample *sitk_image* by *factor* using B-spline interpolation.
 

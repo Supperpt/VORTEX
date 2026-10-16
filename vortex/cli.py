@@ -23,15 +23,16 @@ from rich import box
 
 from vortex import __version__
 from vortex.utils.logging_config import setup_logging, get_logger
-from vortex.state.app_state import PipelineParams
+from vortex.state.app_state import PipelineParams, IsolateParams
 from vortex.pipeline.dicom_loader import list_series, load_series
 from vortex.pipeline.segmentation import segment
 from vortex.pipeline.meshing import generate_mesh, remesh_surface
-from vortex.pipeline.centerlines import compute_centerlines
+from vortex.pipeline.centerlines import compute_centerlines, find_merged_openings
 from vortex.pipeline.flow_extensions import add_flow_extensions
 from vortex.pipeline.exporter import export_stl
 from vortex.pipeline.mesh_quality import check_mesh_quality, extract_bad_triangles
 from vortex.pipeline.sac_clipping import clip_aneurysm_sac
+from vortex.pipeline.vessel_isolation import isolate_aneurysm_region
 from vortex.ui import dashboard
 
 log = get_logger(__name__)
@@ -58,14 +59,24 @@ class Session:
         self.cap_labels: dict = {}         # {CellEntityId(int): 'inlet'|'outlet_N'} from cap_label
         self.seed_mm: Optional[tuple] = None  # (x,y,z) mm — set by set-seed or DICOM seed
         self.clip_sac_view: Optional[dict] = None  # cached clip-sac context for the dashboard panel
+        self.pre_isolation_surface: Any = None     # stashed by 'isolate' for --undo
+        self.surface_source: Optional[str] = None  # "mesh" or "load-mesh"; drives the dashboard hint
+        self.opening_warnings: Optional[dict] = None  # merged openings, keyed to the surface they describe
+        self.isolation_info: Optional[dict] = None # cached 'isolate' report context
+        self.isolation_centerlines: Any = None     # reusable across 'isolate' re-runs
         self.params: PipelineParams = PipelineParams()
+        # Isolation settings live apart from PipelineParams on purpose: nothing
+        # in the segmentation/meshing/export path reads them, so PipelineParams
+        # and its hand-written copy() stay untouched. See IsolateParams.
+        self.isolate_params: IsolateParams = IsolateParams()
 
 session = Session()
 
 # Commands whose output is transient scrollback (reports/tables). After these
 # run we pause before the dashboard redraw clears the screen, so the user can
 # actually read the result.
-REPORT_COMMANDS = {"check", "metrics", "params", "status", "list", "centerlines"}
+REPORT_COMMANDS = {"check", "metrics", "params", "status", "list", "centerlines",
+                   "sample-hu", "sample_hu", "remesh", "isolate", "isolate-params"}
 
 # ---------------------------------------------------------------------------
 # CLI Helpers
@@ -123,6 +134,115 @@ def display_series_table(folder: str):
 
     console.print(table)
     return series
+
+def pause_to_read() -> None:
+    """Hold the screen until Enter: the dashboard clears it on the next turn,
+    so an error printed just before would otherwise vanish unread."""
+    try:
+        console.input("\n[vortex.dim]Press Enter to continue...[/vortex.dim]")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
+def forget_isolation(session) -> None:
+    """Drop isolate's saved state once the surface it describes is gone, so a
+    later 'isolate --undo' cannot bring back a surface from an earlier mesh."""
+    session.pre_isolation_surface = None
+    session.isolation_info = None
+    session.isolation_centerlines = None
+
+
+def confirm_output_dir(path: str):
+    """-> the path with ~ expanded, or None if the user declined to create a
+    missing directory. A trailing separator means the path is the directory."""
+    path = os.path.expanduser(path)
+    folder = path if path.endswith(("/", os.sep)) else os.path.dirname(path)
+    if folder and not os.path.isdir(folder):
+        if not Confirm.ask(f"[yellow]Directory {folder} does not exist.[/yellow] Create it?",
+                           default=True):
+            console.print("[dim]Export cancelled.[/dim]")
+            return None
+        os.makedirs(folder, exist_ok=True)
+    return path
+
+
+def show_isolation_report(result, ip) -> None:
+    """Print isolate's report table, cut list and warnings.
+
+    Shared by the shell's 'isolate' and the one-off 'isolate' / 'process
+    --isolate' commands, so all of them say the same thing.
+    """
+    _st = result["stats"]
+    table = Table(title="Vessel Isolation", header_style="bold magenta")
+    table.add_column("Item", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Centerline engine", result["engine"])
+    table.add_row("Parent vessel diameter", f"{result['parent_diameter_mm']:.2f} mm")
+    table.add_row("Trim distance",
+                  f"{result['threshold_mm']:.1f} mm  ({ip.n_diameters:g} diameters)")
+    table.add_row("Working region",
+                  f"{result['scaffold_mm']:.0f} mm"
+                  + ("  (auto)" if ip.scaffold_auto else "  (fixed)"))
+    table.add_row("Triangles", f"{_st['cells_before']:,} → {_st['cells_after']:,}")
+    table.add_row("Bounding box diagonal",
+                  f"{_st['bbox_before']:.1f} → {_st['bbox_after']:.1f} mm")
+    table.add_row("Openings", f"{_st['openings_before']} → {_st['openings_after']}")
+    table.add_row("Branch cuts", str(len(result["cuts"])))
+    if result["anchor"].retracted:
+        table.add_row("Neck anchor", "retracted onto the trunk")
+    console.print(table)
+
+    for i, c in enumerate(result["cuts"], 1):
+        console.print(
+            f"[dim]  cut {i}: at ({c.origin[0]:.1f}, {c.origin[1]:.1f}, "
+            f"{c.origin[2]:.1f}) mm, radius {c.misr:.2f} mm, "
+            f"{c.geodesic:.1f} mm along the vessel from "
+            + ("where it leaves the aneurysm" if result["measured_from"] == "dome"
+               else "the neck point") + "[/dim]")
+
+    if _st["truncated"]:
+        console.print(
+            "[yellow]⚠ At least one branch reached the working-region "
+            "boundary before the full trim distance.[/yellow]\n"
+            "[dim]That branch is cut square to the box rather than "
+            "perpendicular to the vessel. Raise it with "
+            "'--scaffold 25', or accept it if the vessel "
+            "genuinely leaves the scan there.[/dim]")
+    if _st["untrimmed_edge"] or _st["untrimmed_other"]:
+        console.print(
+            f"[yellow]⚠ {_st['untrimmed_edge'] + _st['untrimmed_other']} "
+            f"opening(s) were not made by a cut[/yellow] "
+            f"({_st['untrimmed_edge']} on the working-region edge, "
+            f"{_st['untrimmed_other']} elsewhere).\n"
+            "[dim]Those vessels were not trimmed to the set length. "
+            "Check them in the output before running centerlines.[/dim]")
+    _merged = _st["merged_openings"]
+    if _merged:
+        console.print(dashboard.render_merged_openings(_merged))
+    if _st["openings_after"] < 2:
+        console.print(
+            f"[yellow]⚠ Only {_st['openings_after']} opening(s) left; "
+            f"'centerlines' needs at least 2.[/yellow]")
+
+
+def warn_merged_openings(surface) -> None:
+    """Print the WARNING panel if two vessels share an opening on *surface*."""
+    merged = find_merged_openings(surface)
+    if merged:
+        console.print(dashboard.render_merged_openings(merged))
+
+
+def run_isolation(surface, seed_mm, ip):
+    """Run isolate with a spinner and print its report. -> result or None."""
+    try:
+        result = run_pipeline_step("Vessel Isolation", isolate_aneurysm_region,
+                                   surface, seed_mm, ip.copy())
+    except Exception as e:
+        console.print(f"[bold red]Isolation failed:[/bold red] {e}")
+        return None
+    show_isolation_report(result, ip)
+    return result
+
 
 def run_pipeline_step(step_name: str, func, *args, **kwargs):
     """Run a pipeline function with a live status spinner."""
@@ -222,15 +342,33 @@ def display_quality_report(report: dict):
 
     # Boundary loops
     loops = report['boundary_loops']
+    tears = report.get('suspect_tear_loops') or []
     if loops == 0:
         stats_table.add_row("Open Boundary Loops",
             "[green]✓ 0 (closed)[/green]", "Watertight")
+    elif tears:
+        stats_table.add_row("Open Boundary Loops",
+            f"[red]✗ {loops}[/red]",
+            f"{len(tears)} look like tears, not openings")
     elif loops >= 2:
         stats_table.add_row("Open Boundary Loops",
             f"[yellow]⚠ {loops}[/yellow]", "Expected before 'extend'")
     else:
         stats_table.add_row("Open Boundary Loops",
             f"[red]✗ {loops}[/red]", "Need ≥2 for CFD")
+
+    # Per-loop radii — a bare count cannot separate real vessel ends from tears
+    profiles = report.get('boundary_loop_profiles') or []
+    if profiles:
+        tear_ids = {p['id'] for p in tears}
+        shown = profiles[:8]
+        parts = []
+        for p in shown:
+            r = f"{p['radius_mm']:.2f}"
+            parts.append(f"[red]{r}✗[/red]" if p['id'] in tear_ids else r)
+        detail = ", ".join(parts) + ("  …" if len(profiles) > len(shown) else "")
+        stats_table.add_row("  Loop radii (mm)", detail,
+                            "✗ = suspected tear" if tears else "")
 
     # Triangle quality
     q = report.get('triangle_quality')
@@ -311,6 +449,81 @@ def display_bad_triangles(worst, ar_threshold, export_path=None):
 
     if export_path:
         console.print(f"  [cyan]Bad triangles exported to:[/cyan] {export_path}")
+
+
+def display_hu_report(stats: dict):
+    """Render a sample_hu_sphere() stats dict: percentiles + threshold suggestions.
+
+    Shared by the shell 'sample-hu' command and the 'sample-hu' CLI subcommand.
+    """
+    table = Table(title=f"Lumen HU around seed (sphere r={stats['radius_mm']:.1f} mm)",
+                  box=box.ROUNDED, header_style="bold magenta")
+    table.add_column("Statistic", style="cyan")
+    table.add_column("HU", justify="right", style="bold")
+    table.add_row("Voxels sampled", f"{stats['count']:,}")
+    table.add_row("min",    f"{stats['min']:.0f}")
+    table.add_row("p5",     f"{stats['p5']:.0f}")
+    table.add_row("median", f"{stats['median']:.0f}")
+    table.add_row("mean",   f"{stats['mean']:.0f}")
+    table.add_row("p95",    f"{stats['p95']:.0f}")
+    table.add_row("p99",    f"{stats['p99']:.0f}")
+    table.add_row("max",    f"{stats['max']:.0f}")
+    console.print(table)
+
+    # Data-driven threshold suggestions (informational only).
+    sug_upper = round(stats['p99'] * 1.10)
+    sug_lower = round(stats['p5'])
+    low_warn = ("  [yellow](close to soft tissue — verify it excludes brain/CSF)[/yellow]"
+                if sug_lower < 100 else "")
+    console.print(
+        f"\n[bold]Suggested thresholds[/bold] [dim](informational — set via 'params' / --lower-threshold/--upper-threshold)[/dim]\n"
+        f"  upper ≈ [green]{sug_upper}[/green] HU  [dim](p99 + 10% margin)[/dim]\n"
+        f"  lower ≈ [green]{sug_lower}[/green] HU  [dim](~p5)[/dim]{low_warn}\n"
+        f"[dim]ACM note: if bone (~300–1900 HU) overlaps the lumen range, "
+        f"isolate it by space (tighter roi_radius / seed component), not by threshold.[/dim]"
+    )
+
+
+def do_sample_hu(args):
+    """CLI handler: sample-hu subcommand (non-interactive)."""
+    from vortex.pipeline.dicom_loader import ijk_to_mm, sample_hu_sphere
+
+    series = list_series(args.folder)
+    if not series:
+        console.print(f"[bold red]No DICOM series found in {args.folder}[/bold red]")
+        return 1
+    uid = args.series_uid or series[0]["series_uid"]
+    sitk_image = load_series(args.folder, uid)
+
+    # Resolve seed in mm: prefer explicit --seed-mm, else convert --seed-ijk.
+    seed_mm = None
+    if args.seed_mm:
+        try:
+            seed_mm = tuple(map(float, args.seed_mm.split(",")))
+        except ValueError:
+            console.print(f"[bold red]Invalid --seed-mm. Expected 'x,y,z', got '{args.seed_mm}'[/bold red]")
+            return 1
+    elif args.seed_ijk:
+        try:
+            seed_ijk = tuple(map(int, args.seed_ijk.split(",")))
+        except ValueError:
+            console.print(f"[bold red]Invalid --seed-ijk. Expected 'i,j,k', got '{args.seed_ijk}'[/bold red]")
+            return 1
+        seed_mm = ijk_to_mm(sitk_image, seed_ijk)
+    else:
+        console.print("[bold red]A seed is required: pass --seed-ijk i,j,k or --seed-mm x,y,z[/bold red]")
+        return 1
+
+    with console.status("[cyan]Sampling HU around seed...", spinner="dots"):
+        stats = sample_hu_sphere(sitk_image, seed_mm, args.radius)
+
+    if stats is None:
+        console.print("[bold red]No voxels sampled.[/bold red] The seed may be outside the "
+                      "volume or the radius too small.")
+        return 1
+
+    display_hu_report(stats)
+    return 0
 
 
 def do_check_mesh(args):
@@ -399,9 +612,111 @@ def do_seed_picker(args):
         console.print("\n[red]Seed picker closed without selection.[/red]")
         return None
 
+def do_remesh(args):
+    """Headless surface remeshing: STL in → STL out.
+
+    Mirrors the shell's `remesh` command so edge-length sweeps and CFD
+    validation runs can be scripted instead of driven interactively.
+    """
+    from vortex.utils.vtk_compat import vtk
+
+    if not os.path.exists(args.input_stl):
+        console.print(f"[bold red]Input STL file not found: {args.input_stl}[/bold red]")
+        return 1
+
+    params = PipelineParams(
+        remesh_adaptive=not args.uniform,
+        remesh_edge_length=args.edge,
+        remesh_min_edge_length=args.min_edge,
+        remesh_smooth_iterations=args.smooth,
+    )
+
+    reader = vtk.vtkSTLReader()
+    reader.SetFileName(args.input_stl)
+    reader.Update()
+    surface = reader.GetOutput()
+
+    if surface.GetNumberOfCells() == 0:
+        console.print("[bold red]The input STL mesh is empty or invalid.[/bold red]")
+        return 1
+
+    mode = (f"adaptive {args.min_edge}–{args.edge} mm"
+            if params.remesh_adaptive else f"uniform {args.edge} mm")
+    console.print(f"\n[bold blue]Remeshing:[/bold blue] {args.input_stl}  "
+                  f"[dim]({mode}, smooth {args.smooth} iter)[/dim]")
+
+    remeshed = run_pipeline_step("Remeshing", remesh_surface, surface, params)
+    if remeshed is None:
+        return 1
+    run_pipeline_step("Exporting STL", export_stl, remeshed, args.output, params)
+
+    console.print(f"\n[bold green]Done![/bold green] "
+                  f"{surface.GetNumberOfCells():,} → {remeshed.GetNumberOfCells():,} triangles → "
+                  f"[cyan]{args.output}[/cyan]")
+
+    if args.check:
+        report = check_mesh_quality(remeshed, deep=False)
+        display_quality_report(report)
+    return 0
+
+
+def _isolate_params(args) -> IsolateParams:
+    """IsolateParams from one-off command flags; unset flags keep the defaults."""
+    ip = IsolateParams()
+    if getattr(args, "diameters", None) is not None:
+        ip.n_diameters = args.diameters
+    if getattr(args, "scaffold", None) is not None:
+        ip.scaffold_mm = args.scaffold
+        ip.scaffold_auto = False        # naming a size means using it, as in the shell
+    if getattr(args, "sphere", None) is not None:
+        ip.cut_sphere_factor = args.sphere
+    return ip
+
+
+def do_isolate(args):
+    """Headless isolate: STL in -> trimmed STL out, same as the shell command."""
+    from vortex.utils.vtk_compat import vtk
+
+    if not os.path.exists(args.input_stl):
+        console.print(f"[bold red]Input STL file not found: {args.input_stl}[/bold red]")
+        return 1
+    try:
+        seed_mm = tuple(map(float, args.seed_mm.split(",")))
+        assert len(seed_mm) == 3
+    except Exception:
+        console.print(f"[bold red]Invalid --seed-mm. Expected 'x,y,z', got '{args.seed_mm}'[/bold red]")
+        return 1
+
+    reader = vtk.vtkSTLReader()
+    reader.SetFileName(args.input_stl)
+    reader.Update()
+    surface = reader.GetOutput()
+    if surface.GetNumberOfCells() == 0:
+        console.print("[bold red]The input STL mesh is empty or invalid.[/bold red]")
+        return 1
+
+    console.print(f"\n[bold blue]Isolating:[/bold blue] {args.input_stl}  "
+                  f"[dim](seed {seed_mm[0]:.1f}, {seed_mm[1]:.1f}, {seed_mm[2]:.1f} mm)[/dim]")
+    result = run_isolation(surface, seed_mm, _isolate_params(args))
+    if result is None:
+        return 1
+
+    out_dir = os.path.dirname(os.path.abspath(args.output))
+    os.makedirs(out_dir, exist_ok=True)
+    writer = vtk.vtkSTLWriter()
+    writer.SetFileName(args.output)
+    writer.SetInputData(result["surface"])
+    writer.Write()
+    console.print(f"\n[bold green]Done![/bold green] Isolated surface saved to: "
+                  f"[cyan]{args.output}[/cyan]\n"
+                  "[dim]Next: process-mesh on it, for centerlines, flow extensions "
+                  "and caps.[/dim]")
+    return 0
+
+
 def do_process_mesh(args):
     from vortex.utils.vtk_compat import vtk
-    
+
     if not os.path.exists(args.input_stl):
         console.print(f"[bold red]Input STL file not found: {args.input_stl}[/bold red]")
         return 1
@@ -426,6 +741,7 @@ def do_process_mesh(args):
         return 1
 
     centerlines, _ = run_pipeline_step("Centerlines", compute_centerlines, surface)
+    warn_merged_openings(surface)
     final_surface = run_pipeline_step("Flow Extensions & Capping", add_flow_extensions, surface, centerlines, params)
     run_pipeline_step("Exporting STL", export_stl, final_surface, args.output, params)
 
@@ -475,10 +791,22 @@ def do_process(args):
     # 3. Mesh
     surface = run_pipeline_step("Meshing", generate_mesh, vtk_image, params)
 
+    # 4. Isolate (optional): trim the tree to the aneurysm before centerlines
+    if args.isolate:
+        if seed_ijk is None:
+            console.print("[bold red]--isolate needs --seed-ijk: it trims around the seed.[/bold red]")
+            return 1
+        from vortex.pipeline.dicom_loader import ijk_to_mm
+        result = run_isolation(surface, ijk_to_mm(sitk_image, seed_ijk), _isolate_params(args))
+        if result is None:
+            return 1
+        surface = result["surface"]
+
     # Centerlines & Extensions
     final_surface = surface
     if args.centerlines:
         centerlines, _ = run_pipeline_step("Centerlines", compute_centerlines, surface)
+        warn_merged_openings(surface)
 
         if args.flow_extensions:
             # Parse selective IDs if provided
@@ -582,10 +910,15 @@ def do_shell():
                     "  [cyan]list[/cyan]                    List series in loaded folder\n"
                     "  [cyan]seed[/cyan]                    Open DICOM visual seed picker (requires DICOM)\n"
                     "  [cyan]set-seed X Y Z[/cyan]          Set seed coordinates (e.g. read from MeshLab/Meshmixer)\n"
+                    "  [cyan]sample-hu [radius][/cyan]      Sample lumen HU around the seed to pick lower/upper thresholds\n"
                     "  [cyan]status[/cyan]                  Show pipeline dashboard\n"
                     "  [cyan]reset [geometry|all][/cyan]   Clear computed mesh/results (geometry), or everything (all)\n"
                     "  [cyan]segment[/cyan]                 Run segmentation\n"
                     "  [cyan]mesh[/cyan]                    Generate mesh\n"
+                    "  [cyan]isolate [--diameters N][/cyan]  Trim to the aneurysm + N vessel diameters of parent vessel,\n"
+                    "                          replacing manual MeshLab/Meshmixer editing. Run after mesh.\n"
+                    "                          Adds [cyan]--scaffold MM[/cyan] [cyan]--sphere K[/cyan] [cyan]--undo[/cyan]. Re-run centerlines afterwards.\n"
+                    "  [cyan]isolate-params[/cyan]          Show/edit the isolation settings (separate from 'params')\n"
                     "  [cyan]remesh[/cyan]                  Smooth + uniformly remesh the surface for CFD quality (before centerlines)\n"
                     "  [cyan]centerlines[/cyan]             Compute centerlines\n"
                     "  [cyan]extend[/cyan]                  Add flow extensions & cap\n"
@@ -627,6 +960,8 @@ def do_shell():
                     session.neck_plane    = None
                     session.cap_labels    = {}
                     session.clip_sac_view = None
+                    forget_isolation(session)
+                    session.surface_source = None
                     if scope == "all":
                         session.sitk_image = None
                         session.folder     = None
@@ -678,6 +1013,8 @@ def do_shell():
                     session.final_surface = loaded
                     session.centerlines   = None
                     session.profiles      = None
+                    forget_isolation(session)
+                    session.surface_source = "load-mesh"
                     n_pts   = loaded.GetNumberOfPoints()
                     n_cells = loaded.GetNumberOfCells()
                     console.print(
@@ -727,6 +1064,14 @@ def do_shell():
             elif cmd == "segment":
                 if session.sitk_image is None:
                     console.print("[red]No image loaded.[/red]")
+                    pause_to_read()
+                elif not session.params.seed_point_ijk:
+                    console.print(
+                        "[red]No seed point — segmentation needs one.[/red]\n"
+                        "[dim]Run 'seed' to pick a point inside the aneurysm on the DICOM "
+                        "slices. ('set-seed X Y Z' is for meshes loaded with 'load-mesh', "
+                        "not for segmentation.)[/dim]")
+                    pause_to_read()
                 else:
                     session.vtk_image = run_pipeline_step("Segmentation", segment, session.sitk_image, session.params)
 
@@ -736,6 +1081,154 @@ def do_shell():
                 else:
                     session.surface = run_pipeline_step("Meshing", generate_mesh, session.vtk_image, session.params)
                     session.final_surface = session.surface
+                    forget_isolation(session)
+                    session.surface_source = "mesh"
+
+            elif cmd == "isolate":
+                _tok = parts[1:]
+                if "--undo" in _tok:
+                    if session.pre_isolation_surface is None:
+                        console.print("[yellow]Nothing to undo — 'isolate' has not run.[/yellow]")
+                    else:
+                        session.surface = session.pre_isolation_surface
+                        session.final_surface = session.surface
+                        session.pre_isolation_surface = None
+                        session.isolation_info = None
+                        session.isolation_centerlines = None
+                        session.centerlines = None
+                        session.profiles = []
+                        console.print(
+                            f"[green]Restored the pre-isolation surface[/green] "
+                            f"({session.surface.GetNumberOfCells():,} triangles).")
+                    continue
+
+                if session.surface is None:
+                    console.print("[red]Run 'mesh' or 'load-mesh' first.[/red]")
+                    pause_to_read()
+                    continue
+
+                # Flags persist into isolate_params, the way clip-sac --ratio does,
+                # so a value set here shows up later in 'isolate-params'.
+                ip = session.isolate_params
+                _bad = False
+                for _flag, _attr in (("--diameters", "n_diameters"),
+                                     ("--scaffold", "scaffold_mm"),
+                                     ("--sphere", "cut_sphere_factor")):
+                    if _flag in _tok:
+                        try:
+                            _new = float(_tok[_tok.index(_flag) + 1])
+                        except (IndexError, ValueError):
+                            console.print(f"[red]Usage: isolate [{_flag} N][/red]")
+                            pause_to_read()
+                            _bad = True
+                            break
+                        # Centerlines are computed on the scaffold, so a different
+                        # scaffold invalidates them. --diameters and --sphere only
+                        # affect what happens after, so their cache stays valid.
+                        if _attr == "scaffold_mm":
+                            if _new != ip.scaffold_mm:
+                                session.isolation_centerlines = None
+                            # Naming a size means using it, not capping it.
+                            ip.scaffold_auto = False
+                        setattr(ip, _attr, _new)
+                if _bad:
+                    continue
+
+                seed_mm = session.seed_mm
+                if seed_mm is None and session.params.seed_point_ijk and session.sitk_image:
+                    from vortex.pipeline.dicom_loader import ijk_to_mm
+                    seed_mm = ijk_to_mm(session.sitk_image, session.params.seed_point_ijk)
+                if seed_mm is None:
+                    console.print(
+                        "[red]No seed point available.[/red]\n"
+                        "[dim]Options:\n"
+                        "  • 'set-seed X Y Z'   — type coordinates from MeshLab / Meshmixer\n"
+                        "  • 'seed'             — DICOM slice picker (requires DICOM loaded)[/dim]"
+                    )
+                    pause_to_read()
+                    continue
+
+                _before = session.surface
+                try:
+                    result = run_pipeline_step(
+                        "Vessel Isolation", isolate_aneurysm_region,
+                        session.surface, seed_mm, ip.copy(),
+                        session.isolation_centerlines)
+                except Exception as e:
+                    console.print(f"[red]Isolation failed:[/red] {e}")
+                    pause_to_read()
+                    continue
+
+                session.pre_isolation_surface = _before
+                session.surface = result["surface"]
+                session.final_surface = session.surface
+                session.isolation_centerlines = result["centerlines"]
+                session.isolation_info = result
+
+                # Everything derived from the old triangulation is now stale.
+                # The centerlines especially: isolate created new openings that
+                # did not exist when they were computed, and 'extend' places
+                # flow extensions from where centerlines terminate.
+                session.centerlines   = None
+                session.profiles      = []
+                session.sac_surface   = None
+                session.parent_vessel = None
+                session.bulge_surface = None
+                session.neck_plane    = None
+                session.clip_sac_view = None
+                session.cap_labels    = {}
+
+                show_isolation_report(result, ip)
+                session.opening_warnings = {"surface": session.surface,
+                                            "merged": result["stats"]["merged_openings"]}
+
+                console.print(
+                    "[dim]Next: 'check' → 'remesh' → [cyan]'centerlines'[/cyan] → 'extend' → "
+                    "'clip-sac' → 'export'.\n"
+                    "Centerlines must be recomputed — the ones isolate used "
+                    "described the untrimmed surface. Use 'isolate --undo' to go back.[/dim]")
+
+            elif cmd == "isolate-params":
+                ip = session.isolate_params
+                table = Table(title="Isolation Parameters", header_style="bold magenta")
+                table.add_column("Param", style="cyan")
+                table.add_column("Value", style="green")
+                table.add_column("Meaning", style="dim")
+                table.add_row("n_diameters", f"{ip.n_diameters:g}",
+                              "parent diameters of vessel kept past the neck")
+                table.add_row("scaffold_mm", f"{ip.scaffold_mm:g}",
+                              "upper bound on the working region around the seed")
+                table.add_row("scaffold_auto", str(ip.scaffold_auto),
+                              "size the region from the data (False pins scaffold_mm)")
+                table.add_row("scaffold_inset_mm", f"{ip.scaffold_inset_mm:g}",
+                              "inset that turns sealed vessel ends into open holes")
+                table.add_row("cut_sphere_factor", f"{ip.cut_sphere_factor:g}",
+                              "cut localisation radius, in measured cross-section radii")
+                table.add_row("tear_radius_mm", f"{ip.tear_radius_mm:g}",
+                              "openings below this are filled as tears")
+                table.add_row("decimate_target", f"{ip.decimate_target:g}",
+                              "decimation before the sealed-surface fallback only")
+                table.add_row("anchor_retract", str(ip.anchor_retract),
+                              "walk off a sac-intruding branch (fallback engine only)")
+                console.print(table)
+                console.print("[dim]These affect 'isolate' only. roi_radius in "
+                              "'params' is a segmentation setting and is unrelated.[/dim]")
+                if Confirm.ask("Edit a parameter?"):
+                    key = Prompt.ask("Parameter name",
+                                     choices=["diameters", "scaffold", "auto", "inset",
+                                              "sphere", "tear", "decimate", "retract"])
+                    val = Prompt.ask("New value")
+                    try:
+                        if key == "diameters": ip.n_diameters = float(val)
+                        if key == "scaffold":  ip.scaffold_mm = float(val)
+                        if key == "auto":      ip.scaffold_auto = (val.lower() == "true")
+                        if key == "inset":     ip.scaffold_inset_mm = float(val)
+                        if key == "sphere":    ip.cut_sphere_factor = float(val)
+                        if key == "tear":      ip.tear_radius_mm = float(val)
+                        if key == "decimate":  ip.decimate_target = float(val)
+                        if key == "retract":   ip.anchor_retract = (val.lower() == "true")
+                    except ValueError:
+                        console.print(f"[red]'{val}' is not a valid number.[/red]")
 
             elif cmd == "remesh":
                 if session.surface is None:
@@ -757,14 +1250,38 @@ def do_shell():
                         # run on the coarse surface, not the dense remeshed one). Centerlines
                         # computed AFTER remesh on the fine surface are very slow.
                         had_centerlines = session.centerlines is not None
+
+                        # Anything derived from the OLD triangulation is now stale.
+                        # final_surface above is the uncapped lumen, so cap_labels
+                        # would point at CellEntityIds that no longer exist and get
+                        # handed straight to export_stl. 'extend' clears them for the
+                        # same reason.
+                        dropped = []
+                        if session.cap_labels:
+                            session.cap_labels = {}
+                            dropped.append("cap labels")
+                        if session.sac_surface is not None or session.parent_vessel is not None:
+                            dropped.append("clip-sac patches")
+                        session.sac_surface = None
+                        session.parent_vessel = None
+                        session.neck_plane = None
+                        session.bulge_surface = None
+                        session.clip_sac_view = None
+
                         next_step = "'extend'" if had_centerlines else "'centerlines' → 'extend'"
+                        mode = ("adaptive "
+                                f"{session.params.remesh_min_edge_length}–{session.params.remesh_edge_length} mm"
+                                if session.params.remesh_adaptive
+                                else f"uniform {session.params.remesh_edge_length} mm")
                         console.print(
                             f"[green]Remeshed:[/green] {n_before:,} → "
                             f"{remeshed.GetNumberOfCells():,} triangles "
-                            f"(edge {session.params.remesh_edge_length} mm, "
-                            f"smooth {session.params.remesh_smooth_iterations} iter)\n"
+                            f"({mode}, smooth {session.params.remesh_smooth_iterations} iter)\n"
                             + ("[dim]Kept existing centerlines (still valid after remesh).[/dim]\n"
                                if had_centerlines else "")
+                            + (f"[yellow]Cleared {' and '.join(dropped)}[/yellow] "
+                               "[dim](stale after retriangulation — re-run those steps).[/dim]\n"
+                               if dropped else "")
                             + f"[dim]Re-run {next_step} → 'clip-sac' → 'cap_label' → 'export'.[/dim]"
                         )
 
@@ -834,6 +1351,10 @@ def do_shell():
                         
                         console.print(table)
                         console.print("[dim]Use these IDs to select specific vessels for 'extend' (Future). Currently all are extended.[/dim]")
+                    _merged = find_merged_openings(session.surface)
+                    session.opening_warnings = {"surface": session.surface, "merged": _merged}
+                    if _merged:
+                        console.print(dashboard.render_merged_openings(_merged))
 
             elif cmd == "extend":
                 if session.centerlines is None:
@@ -1011,6 +1532,23 @@ def do_shell():
                             "[vortex.accent]view[/vortex.accent] and press "
                             "[vortex.accent]c[/vortex.accent] to see cap numbers on the model.[/vortex.dim]"
                         )
+                        # Caps far smaller than the largest are usually capped
+                        # tears rather than vessel ends. Warn instead of
+                        # filtering — a genuine small distal outlet looks the
+                        # same, and silently dropping it would break the CFD
+                        # boundary conditions.
+                        max_area = max(area for *_, area in caps)
+                        specks = [uid for uid, _p, _c, area in caps
+                                  if max_area > 0 and area <= 0.02 * max_area]
+                        if specks:
+                            console.print(
+                                f"[red]Warning:[/red] {len(specks)} cap(s) are under 2% of the "
+                                f"largest cap's area ({max_area:.1f} mm²): "
+                                f"{', '.join(str(u) for u in specks)}.\n"
+                                "[dim]These are usually capped tears in the surface, not vessel "
+                                "openings. Consider aborting (Ctrl-C), running 'check' on the "
+                                "pre-extend surface, and re-running 'remesh' → 'extend'.[/dim]"
+                            )
                         cap_labels: dict = {}
                         outlet_n = 0
                         for uid, _poly, centroid, area in caps:
@@ -1041,6 +1579,44 @@ def do_shell():
                             session.cap_labels = cap_labels
                             summary = "  ".join(f"cap {u}→{l}" for u, l in cap_labels.items())
                             console.print(f"[green]Caps labelled:[/green] {summary}")
+
+            elif cmd in ("sample-hu", "sample_hu"):
+                if session.sitk_image is None:
+                    console.print(
+                        "[red]HU sampling needs a DICOM volume loaded.[/red] Run 'load <dir>' first."
+                    )
+                else:
+                    # Resolve a seed in mm — same pattern as clip-sac / metrics.
+                    seed_mm = session.seed_mm
+                    if seed_mm is None and session.params.seed_point_ijk and session.sitk_image:
+                        from vortex.pipeline.dicom_loader import ijk_to_mm
+                        seed_mm = ijk_to_mm(session.sitk_image, session.params.seed_point_ijk)
+                    if seed_mm is None:
+                        console.print(
+                            "[red]No seed point available.[/red]\n"
+                            "[dim]Options:\n"
+                            "  • 'set-seed X Y Z'   — type coordinates from MeshLab / Meshmixer\n"
+                            "  • 'seed'             — DICOM slice picker (requires DICOM loaded)[/dim]"
+                        )
+                    else:
+                        radius = 3.0
+                        if len(parts) > 1:
+                            try:
+                                radius = float(parts[1])
+                            except ValueError:
+                                console.print("[yellow]Radius must be a number (mm), using 3.0[/yellow]")
+
+                        from vortex.pipeline.dicom_loader import sample_hu_sphere
+                        with console.status("[cyan]Sampling HU around seed...", spinner="dots"):
+                            stats = sample_hu_sphere(session.sitk_image, seed_mm, radius)
+
+                        if stats is None:
+                            console.print(
+                                "[red]No voxels sampled.[/red] The seed may be outside the volume "
+                                "or the radius too small."
+                            )
+                        else:
+                            display_hu_report(stats)
 
             elif cmd == "metrics":
                 if session.surface is None:
@@ -1075,7 +1651,9 @@ def do_shell():
                 if session.final_surface is None:
                     console.print("[red]Nothing to export.[/red]")
                 else:
-                    path = parts[1] if len(parts) > 1 else "output.stl"
+                    path = confirm_output_dir(parts[1] if len(parts) > 1 else "output.stl")
+                    if path is None:
+                        continue
                     out_path = run_pipeline_step("Exporting STL", export_stl,
                                       session.final_surface, path, session.params,
                                       sac_surface=session.sac_surface,
@@ -1097,7 +1675,9 @@ def do_shell():
                 if session.vtk_image is None:
                     console.print("[red]Run 'segment' first to generate a mask.[/red]")
                 else:
-                    path = parts[1] if len(parts) > 1 else "segmentation_mask.nii.gz"
+                    path = confirm_output_dir(parts[1] if len(parts) > 1 else "segmentation_mask.nii.gz")
+                    if path is None:
+                        continue
                     
                     def _export_mask_step(vtk_img, p, cb=None):
                         import SimpleITK as sitk
@@ -1138,7 +1718,9 @@ def do_shell():
                 table.add_row("levelset_curvature", str(p.levelset_curvature))
                 table.add_row("levelset_propagation", str(p.levelset_propagation))
                 table.add_row("flow_ext_ratio", str(p.flow_ext_ratio))
-                table.add_row("remesh_edge_length", str(p.remesh_edge_length))
+                table.add_row("remesh_adaptive", str(p.remesh_adaptive))
+                table.add_row("remesh_edge_length", f"{p.remesh_edge_length}  (coarsest)")
+                table.add_row("remesh_min_edge_length", f"{p.remesh_min_edge_length}  (finest, adaptive only)")
                 table.add_row("remesh_smooth_iterations", str(p.remesh_smooth_iterations))
                 table.add_row("output_mode", "fsi" if p.build_wall else "solid" if p.solid else "cfd")
                 table.add_row("split_patches", str(p.split_patches))
@@ -1146,7 +1728,7 @@ def do_shell():
 
                 console.print(table)
                 if Confirm.ask("Edit a parameter?"):
-                    key = Prompt.ask("Parameter name", choices=["lower", "upper", "resample", "roi", "levelset", "ls_iter", "ls_curv", "ls_prop", "ratio", "edge", "smooth", "split", "sac_ratio"])
+                    key = Prompt.ask("Parameter name", choices=["lower", "upper", "resample", "roi", "levelset", "ls_iter", "ls_curv", "ls_prop", "ratio", "adaptive", "edge", "min_edge", "smooth", "split", "sac_ratio"])
                     val = Prompt.ask("New value")
                     if key == "lower": p.lower_threshold = float(val)
                     if key == "upper": p.upper_threshold = float(val)
@@ -1157,21 +1739,21 @@ def do_shell():
                     if key == "ls_curv": p.levelset_curvature = float(val)
                     if key == "ls_prop": p.levelset_propagation = float(val)
                     if key == "ratio": p.flow_ext_ratio = float(val)
+                    if key == "adaptive": p.remesh_adaptive = (val.lower() == "true")
                     if key == "edge": p.remesh_edge_length = float(val)
+                    if key == "min_edge": p.remesh_min_edge_length = float(val)
                     if key == "smooth": p.remesh_smooth_iterations = int(val)
                     if key == "split": p.split_patches = (val.lower() == "true")
                     if key == "sac_ratio": p.sac_bulge_ratio = float(val)
 
             else:
                 console.print(f"[red]Unknown command:[/red] {cmd}")
+                pause_to_read()
 
             # The dashboard clears the screen on the next loop turn. Pause after
             # commands whose output is a report/table so it can actually be read.
             if cmd in REPORT_COMMANDS:
-                try:
-                    console.input("\n[vortex.dim]Press Enter to continue...[/vortex.dim]")
-                except (EOFError, KeyboardInterrupt):
-                    pass
+                pause_to_read()
 
         except KeyboardInterrupt:
             continue
@@ -1179,6 +1761,7 @@ def do_shell():
             break
         except Exception as e:
             console.print(f"[bold red]Error:[/bold red] {e}")
+            pause_to_read()
 
     console.print("\n[blue]Exiting VORTEX Shell.[/blue]")
 
@@ -1207,6 +1790,16 @@ def create_parser() -> argparse.ArgumentParser:
     seed_p.add_argument("folder", help="Path to DICOM folder")
     seed_p.add_argument("--series-uid", help="Specific SeriesInstanceUID to load (default: largest)")
 
+    # Command: sample-hu
+    hu_p = subparsers.add_parser("sample-hu",
+                                 help="Sample lumen HU around a seed to pick lower/upper thresholds")
+    hu_p.add_argument("folder", help="Path to DICOM folder")
+    hu_p.add_argument("--series-uid", help="Specific SeriesInstanceUID to load (default: largest)")
+    hu_p.add_argument("--seed-ijk", help="Seed point as image index 'i,j,k' (e.g. from seed-picker)")
+    hu_p.add_argument("--seed-mm", help="Seed point as world coordinates 'x,y,z' in mm")
+    hu_p.add_argument("--radius", type=float, default=3.0,
+                      help="Sphere radius in mm (default: 3.0)")
+
     # Command: check-mesh
     chk_p = subparsers.add_parser("check-mesh", help="Report mesh quality (manifold, holes, triangle quality)")
     chk_p.add_argument("input_stl", help="Path to STL file to check")
@@ -1216,6 +1809,34 @@ def create_parser() -> argparse.ArgumentParser:
                        help="Export bad triangles (above --ar-threshold) to this STL file")
     chk_p.add_argument("--ar-threshold", type=float, default=20.0, metavar="N",
                        help="Aspect-ratio threshold for bad-triangle detection (default: 20.0)")
+
+    # Command: remesh
+    rm_p = subparsers.add_parser("remesh",
+                                 help="Remesh an STL for CFD-grade triangle quality (curvature-adaptive)")
+    rm_p.add_argument("input_stl", help="Path to input STL file")
+    rm_p.add_argument("--output", "-o", default="remeshed.stl", help="Path to output STL file")
+    rm_p.add_argument("--edge", type=float, default=0.5, metavar="MM",
+                      help="Coarsest triangle edge, on flat vessel (default: 0.5). "
+                           "Uniform edge length when --uniform is given.")
+    rm_p.add_argument("--min-edge", type=float, default=0.2, metavar="MM",
+                      help="Finest triangle edge, where curvature is high (default: 0.2). Adaptive only.")
+    rm_p.add_argument("--smooth", type=int, default=20, metavar="N",
+                      help="Taubin smoothing iterations, 0 to skip (default: 20). "
+                           "Use 0 on a surface already smoothed by 'mesh'.")
+    rm_p.add_argument("--uniform", action="store_true",
+                      help="Disable curvature adaptation and use --edge everywhere")
+    rm_p.add_argument("--check", action="store_true",
+                      help="Print a mesh quality report on the result")
+
+    # Command: isolate
+    iso_p = subparsers.add_parser("isolate",
+                                  help="Trim a segmented STL to the aneurysm plus N vessel diameters")
+    iso_p.add_argument("input_stl", help="Path to input STL file (e.g. straight from 'process')")
+    iso_p.add_argument("--seed-mm", required=True,
+                       help="Point inside the aneurysm dome, as world coordinates 'x,y,z' in mm. "
+                            "Write --seed-mm=x,y,z when x is negative.")
+    iso_p.add_argument("--output", "-o", default="isolated.stl", help="Path to output STL file")
+    _add_isolate_flags(iso_p)
 
     # Command: process-mesh
     mesh_p = subparsers.add_parser("process-mesh", help="Apply centerlines/extensions/capping to an existing STL")
@@ -1252,6 +1873,12 @@ def create_parser() -> argparse.ArgumentParser:
     mesh_g.add_argument("--reduce-mesh", type=float, default=0.0, help="Mesh reduction fraction")
     mesh_g.add_argument("--increase-mesh", type=int, default=0, help="Mesh subdivision passes")
 
+    # Isolation
+    iso_g = proc_p.add_argument_group("Vessel Isolation")
+    iso_g.add_argument("--isolate", action="store_true",
+                       help="Trim the tree to the aneurysm after meshing (needs --seed-ijk)")
+    _add_isolate_flags(iso_g)
+
     # Flow extensions
     flow_g = proc_p.add_argument_group("Flow Extensions")
     flow_g.add_argument("--centerlines", action="store_true", help="Compute vessel centerlines")
@@ -1266,6 +1893,16 @@ def create_parser() -> argparse.ArgumentParser:
     out_g.add_argument("--split-patches", action="store_true", help="Split CFD output into separate STLs for wall and caps")
 
     return parser
+
+def _add_isolate_flags(p) -> None:
+    """Flags shared by 'isolate' and 'process --isolate'; unset keeps the default."""
+    p.add_argument("--diameters", type=float, metavar="N",
+                   help="Vessel kept past the aneurysm, in parent diameters (default: 5)")
+    p.add_argument("--scaffold", type=float, metavar="MM",
+                   help="Fix the working-region size instead of sizing it from the data")
+    p.add_argument("--sphere", type=float, metavar="K",
+                   help="Cut localisation radius, in vessel radii (default: 2.5)")
+
 
 def main():
     setup_logging()
@@ -1283,8 +1920,14 @@ def main():
             do_list_series(args)
         elif args.command == "seed-picker":
             do_seed_picker(args)
+        elif args.command == "sample-hu":
+            sys.exit(do_sample_hu(args))
         elif args.command == "check-mesh":
             sys.exit(do_check_mesh(args))
+        elif args.command == "remesh":
+            sys.exit(do_remesh(args))
+        elif args.command == "isolate":
+            sys.exit(do_isolate(args))
         elif args.command == "process-mesh":
             sys.exit(do_process_mesh(args))
         elif args.command == "process":

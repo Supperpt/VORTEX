@@ -6,20 +6,25 @@ Entry point:
 Checks performed:
   - Basic stats (points, triangles, surface area, bounding box)
   - Non-manifold edges   (critical — CFD mesher will fail on these)
-  - Open boundary loops  (how many holes / vessel openings)
+  - Open boundary loops  (how many, their radii, and which look like tears)
   - Triangle quality     (aspect ratio + min angle via vtkMeshQuality)
   - Normal consistency   (inconsistent normals → wrong boundary conditions)
   - Self-intersections   (only with deep=True — slow)
 """
 
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from vortex.utils.vtk_compat import vtk, vtk_np
 
 log = logging.getLogger(__name__)
+
+# A boundary loop this much smaller than the largest one is a tear, not a
+# vessel opening. Tears get capped by 'extend' and then show up as phantom
+# caps in 'cap_label'.
+_TEAR_RADIUS_FRACTION = 0.15
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +80,14 @@ def check_mesh_quality(mesh: Any, deep: bool = False) -> Dict:
     # ── 3. Open boundary loops ───────────────────────────────────────────────
     n_loops = _count_boundary_loops(mesh)
     results['boundary_loops'] = n_loops
+
+    # Per-loop radii, so a torn surface is distinguishable from real openings.
+    # A bare count cannot tell 3 vessel ends from 3 vessel ends plus 44 tears.
+    loop_profiles = _boundary_loop_profiles(mesh)
+    results['boundary_loop_profiles'] = loop_profiles
+    tiny = _suspect_tear_loops(loop_profiles)
+    results['suspect_tear_loops'] = tiny
+
     if n_loops == 0:
         issues.append(('info',
             "Mesh is closed (watertight). Ready to export or run 'extend'."))
@@ -85,6 +98,15 @@ def check_mesh_quality(mesh: Any, deep: bool = False) -> Dict:
         issues.append(('warning',
             "Only 1 open boundary loop. CFD needs ≥2 openings (inlet + outlet). "
             "Check segmentation or mesh editing."))
+
+    if tiny:
+        biggest = loop_profiles[0]['radius_mm']
+        issues.append(('error',
+            f"{len(tiny)} of {n_loops} boundary loop(s) are tiny "
+            f"(radius ≤ {_TEAR_RADIUS_FRACTION:.0%} of the largest, {biggest:.2f} mm) — "
+            "these look like tears, not vessel openings. 'extend' would cap each one "
+            "and 'cap_label' would prompt for every phantom cap. "
+            "Re-run 'remesh', or repair the surface before capping."))
 
     # ── 4. Triangle quality ──────────────────────────────────────────────────
     q = _compute_triangle_quality(mesh)
@@ -175,6 +197,37 @@ def _count_boundary_loops(mesh) -> int:
     conn.SetExtractionModeToAllRegions()
     conn.Update()
     return conn.GetNumberOfExtractedRegions()
+
+
+def _boundary_loop_profiles(mesh) -> List[Dict]:
+    """Per-loop {id, center_mm, radius_mm}, largest first.
+
+    Reuses the centerlines boundary detector so `check` and the boundary table
+    shown after `centerlines` describe openings identically.
+    """
+    try:
+        from vortex.pipeline.centerlines import _detect_boundary_profiles
+        return _detect_boundary_profiles(mesh)
+    except Exception as e:
+        log.debug("Boundary loop profiling failed: %s", e)
+        return []
+
+
+def _suspect_tear_loops(profiles: List[Dict]) -> List[Dict]:
+    """Loops far smaller than the largest — almost certainly tears, not openings.
+
+    A real inlet/outlet is within an order of magnitude of the other openings;
+    a seam left by point-splitting or a remesh hole is a fraction of a
+    millimetre.  Needs at least 3 loops before judging, so a genuine
+    inlet + small distal outlet pair is never flagged.
+    """
+    if len(profiles) < 3:
+        return []
+    biggest = profiles[0]['radius_mm']
+    if biggest <= 0:
+        return []
+    return [p for p in profiles
+            if p['radius_mm'] <= _TEAR_RADIUS_FRACTION * biggest]
 
 
 def _compute_triangle_quality(mesh) -> Optional[Dict]:
