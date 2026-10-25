@@ -30,7 +30,7 @@ class SeedPickerWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
-        self.info_label = QLabel("Loading DICOM series...")
+        self.info_label = QLabel("Loading image series...")
         self.info_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         layout.addWidget(self.info_label)
 
@@ -54,7 +54,7 @@ class SeedPickerWindow(QMainWindow):
         try:
             series = list_series(self.folder)
             if not series:
-                QMessageBox.critical(self, "Error", f"No DICOM series found in {self.folder}")
+                QMessageBox.critical(self, "Error", f"No DICOM series or NIfTI files found in {self.folder}")
                 sys.exit(1)
             
             uid = self.series_uid or series[0]["series_uid"]
@@ -67,7 +67,7 @@ class SeedPickerWindow(QMainWindow):
             self.viewer.set_image(sitk_img, array)
             
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load DICOM: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to load image: {str(e)}")
             sys.exit(1)
 
     def _on_seed_placed(self, ijk):
