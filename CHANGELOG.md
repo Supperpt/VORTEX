@@ -5,6 +5,14 @@ All notable changes to VORTEX are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- NIfTI input (`.nii` / `.nii.gz`): `load`, `list-series`, `seed-picker`,
+  `sample-hu` and `process` accept a NIfTI file, and NIfTI files inside a
+  scanned folder are listed alongside DICOM series. Volumes are reoriented to
+  LPS on load so meshes align with world mm; 4-D files use the first volume.
+
 ## [1.1.0] — 2026-10-16
 
 ### Added

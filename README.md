@@ -5,9 +5,9 @@
 ![Platform](https://img.shields.io/badge/platform-GNU%2FLinux-lightgrey.svg)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20729349.svg)](https://doi.org/10.5281/zenodo.20729349)
 
-**Cerebral aneurysm 3D model pipeline — DICOM → STL for CFD/FSI/3D printing**
+**Cerebral aneurysm 3D model pipeline — DICOM / NIfTI → STL for CFD/FSI/3D printing**
 
-VORTEX (Vascular Output & Real-time Thresholding EXtraction) is a tool for processing angio-CT or angio-MR DICOM images into high-quality STL meshes. It is designed to produce watertight models ready for OpenFOAM rigid-wall CFD, FSI simulations, or 3D printing.
+VORTEX (Vascular Output & Real-time Thresholding EXtraction) is a tool for processing angio-CT or angio-MR DICOM or NIfTI (`.nii` / `.nii.gz`) images into high-quality STL meshes. It is designed to produce watertight models ready for OpenFOAM rigid-wall CFD, FSI simulations, or 3D printing.
 It is designed to be used in GNU/Linux systems. Windows 11 users can run it via WSL2 (see [Windows 11 Installation](#windows-11-installation-via-wsl2) below).
 
 VORTEX is driven entirely through a command-line interface and a stateful
@@ -116,7 +116,7 @@ In practice, almost every cerebral aneurysm case requires **external mesh editin
 ### Phase 1 — Initial Segmentation (DICOM → raw STL)
 
 ```
-load "/path/to/dicom"   ← select the angio-CT or angio-MR series
+load "/path/to/dicom"   ← select the angio-CT or angio-MR series (or: load "/path/to/scan.nii.gz")
 seed                    ← click the aneurysm in the slice viewer to anchor the segmentation
 segment                 ← threshold + connected-component isolation
 mesh                    ← Marching Cubes + smoothing → surface mesh
@@ -366,7 +366,7 @@ export aneurysm.stl
 ### All Shell Commands
 | Command | Description |
 |---|---|
-| `load <dir>` | Load a DICOM folder and select a series. Use quotes for paths with spaces. |
+| `load <dir \| file.nii[.gz]>` | Load a DICOM folder (or a single NIfTI file) and select a series. NIfTI files inside the folder are listed alongside DICOM series. Use quotes for paths with spaces. |
 | `load-mesh <file.stl>` | Load an existing STL directly into the session, skipping segmentation. Useful after external editing. |
 | `list` | Show the series available in the currently loaded folder. |
 | `seed` | Open the DICOM slice viewer to click the aneurysm. **Requires DICOM loaded.** |
@@ -402,7 +402,7 @@ By default, `export <filename.stl>` saves to your **current working directory**.
 For scripted/batch use without the interactive shell.
 
 ### List DICOM Series
-Scan a folder to find available series and their UIDs.
+Scan a folder to find available series and their UIDs. NIfTI files (`.nii` / `.nii.gz`) in the folder are listed too, with UID `nifti:<path>`.
 ```bash
 ./run-cli.sh list-series /path/to/dicom/folder
 ```
@@ -420,6 +420,8 @@ Process the largest series in the folder with default settings (150–400 HU).
 ```bash
 ./run-cli.sh process /path/to/dicom/folder -o result.stl
 ```
+
+**NIfTI input:** every command that takes a DICOM folder also accepts a `.nii` / `.nii.gz` file (e.g. `./run-cli.sh process scan.nii.gz --seed-mm x,y,z -o result.stl`). The volume is reoriented to LPS on load (lossless axis flip/permute), so world-mm coordinates match the scanner, but **voxel indices can differ from those shown by other viewers** — prefer `--seed-mm`, or take the IJK from VORTEX's own `seed-picker`. 4-D files use only the first volume. CT NIfTI must be in HU for the default thresholds to apply.
 
 ### Check Mesh Quality
 Validate a mesh before further processing or CFD export.
@@ -531,7 +533,7 @@ If the scan contains multiple vessels, use a seed point to isolate the aneurysm.
 
 | Argument | Default | Description |
 |---|---|---|
-| `folder` | (Required) | Path to the DICOM folder |
+| `folder` | (Required) | Path to the DICOM folder or a NIfTI file |
 | `--series-uid` | Largest | Specific SeriesInstanceUID to load |
 | `--output`, `-o` | `output.stl` | Output STL path |
 | `--lower-threshold` | `150.0` | Minimum Hounsfield Unit (HU) |
@@ -589,7 +591,7 @@ If the scan contains multiple vessels, use a seed point to isolate the aneurysm.
 
 | Argument | Default | Description |
 |---|---|---|
-| `folder` | (Required) | Path to the DICOM folder |
+| `folder` | (Required) | Path to the DICOM folder or a NIfTI file |
 | `--series-uid` | Largest | Specific SeriesInstanceUID to load |
 
 ### `list-series`
@@ -602,7 +604,7 @@ If the scan contains multiple vessels, use a seed point to isolate the aneurysm.
 
 | Argument | Default | Description |
 |---|---|---|
-| `folder` | (Required) | Path to the DICOM folder |
+| `folder` | (Required) | Path to the DICOM folder or a NIfTI file |
 | `--series-uid` | Largest | Specific SeriesInstanceUID to load |
 | `--seed-ijk` | — | Seed as image index `i,j,k` (e.g. from `seed-picker`) |
 | `--seed-mm` | — | Seed as world coordinates `x,y,z` in mm |

@@ -112,10 +112,10 @@ def display_series_table(folder: str):
         series = list_series(folder)
     
     if not series:
-        console.print(f"[bold red]No DICOM series found in {folder}[/bold red]")
+        console.print(f"[bold red]No DICOM series or NIfTI files found in {folder}[/bold red]")
         return None
 
-    table = Table(title=f"DICOM Series in {folder}", header_style="bold magenta")
+    table = Table(title=f"Image Series in {folder}", header_style="bold magenta")
     table.add_column("Index", justify="right", style="cyan")
     table.add_column("UID (Suffix)", style="dim")
     table.add_column("Slices", justify="right")
@@ -490,7 +490,7 @@ def do_sample_hu(args):
 
     series = list_series(args.folder)
     if not series:
-        console.print(f"[bold red]No DICOM series found in {args.folder}[/bold red]")
+        console.print(f"[bold red]No DICOM series or NIfTI files found in {args.folder}[/bold red]")
         return 1
     uid = args.series_uid or series[0]["series_uid"]
     sitk_image = load_series(args.folder, uid)
@@ -905,7 +905,7 @@ def do_shell():
             elif cmd == "help":
                 console.print(
                     "[bold]Available Commands:[/bold]\n"
-                    "  [cyan]load <dir>[/cyan]              Load DICOM folder\n"
+                    "  [cyan]load <dir|nii>[/cyan]          Load DICOM folder or NIfTI file\n"
                     "  [cyan]load-mesh <file>[/cyan]        Load external STL as surface (skips segment/mesh)\n"
                     "  [cyan]list[/cyan]                    List series in loaded folder\n"
                     "  [cyan]seed[/cyan]                    Open DICOM visual seed picker (requires DICOM)\n"
@@ -978,7 +978,7 @@ def do_shell():
 
             elif cmd == "load":
                 if len(parts) < 2:
-                    console.print("[red]Usage: load <folder_path>[/red]")
+                    console.print("[red]Usage: load <dicom_folder | file.nii[.gz]>[/red]")
                     continue
                 session.folder = parts[1]
                 series = display_series_table(session.folder)
@@ -1771,7 +1771,7 @@ def do_shell():
 
 def create_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="VORTEX Aneurysm — CFD-ready 3D model generator from DICOM images."
+        description="VORTEX Aneurysm — CFD-ready 3D model generator from DICOM or NIfTI images."
     )
     parser.add_argument(
         "--version", action="version", version=f"VORTEX {__version__}"
@@ -1782,18 +1782,18 @@ def create_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("shell", help="Enter interactive shell mode")
 
     # Command: list-series
-    list_p = subparsers.add_parser("list-series", help="List DICOM series in a folder")
-    list_p.add_argument("folder", help="Path to DICOM folder")
+    list_p = subparsers.add_parser("list-series", help="List DICOM series and NIfTI files in a folder")
+    list_p.add_argument("folder", help="Path to DICOM folder or NIfTI file (.nii/.nii.gz)")
 
     # Command: seed-picker
     seed_p = subparsers.add_parser("seed-picker", help="Open a visual window to pick a seed point")
-    seed_p.add_argument("folder", help="Path to DICOM folder")
+    seed_p.add_argument("folder", help="Path to DICOM folder or NIfTI file (.nii/.nii.gz)")
     seed_p.add_argument("--series-uid", help="Specific SeriesInstanceUID to load (default: largest)")
 
     # Command: sample-hu
     hu_p = subparsers.add_parser("sample-hu",
                                  help="Sample lumen HU around a seed to pick lower/upper thresholds")
-    hu_p.add_argument("folder", help="Path to DICOM folder")
+    hu_p.add_argument("folder", help="Path to DICOM folder or NIfTI file (.nii/.nii.gz)")
     hu_p.add_argument("--series-uid", help="Specific SeriesInstanceUID to load (default: largest)")
     hu_p.add_argument("--seed-ijk", help="Seed point as image index 'i,j,k' (e.g. from seed-picker)")
     hu_p.add_argument("--seed-mm", help="Seed point as world coordinates 'x,y,z' in mm")
@@ -1849,7 +1849,7 @@ def create_parser() -> argparse.ArgumentParser:
 
     # Command: process
     proc_p = subparsers.add_parser("process", help="Run the full pipeline")
-    proc_p.add_argument("folder", help="Path to DICOM folder")
+    proc_p.add_argument("folder", help="Path to DICOM folder or NIfTI file (.nii/.nii.gz)")
     proc_p.add_argument("--series-uid", help="Specific SeriesInstanceUID to load (default: largest)")
     proc_p.add_argument("--output", "-o", default="output.stl", help="Path to output STL file (default: output.stl)")
 

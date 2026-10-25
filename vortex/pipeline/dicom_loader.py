@@ -1,8 +1,8 @@
-"""DICOM loading utilities using SimpleITK.
+"""DICOM and NIfTI loading utilities using SimpleITK.
 
 Provides:
-  list_series(folder)          → list of series dicts
-  load_series(folder, uid)     → sitk.Image
+  list_series(path)            → list of series dicts (DICOM series + NIfTI files)
+  load_series(path, uid)       → sitk.Image
   image_to_numpy(sitk_image)   → np.ndarray (z, y, x)
   ijk_to_mm(sitk_image, ijk)   → (x, y, z) in world mm
 """
@@ -19,21 +19,63 @@ sitk.ProcessObject_SetGlobalWarningDisplay(False)
 
 log = logging.getLogger(__name__)
 
+# NIfTI volumes are listed alongside DICOM series. Their series_uid is this
+# prefix + the absolute file path, so load_series can tell the two apart.
+NIFTI_UID_PREFIX = "nifti:"
+NIFTI_EXTENSIONS = (".nii", ".nii.gz")
+
+
+def is_nifti_path(path: str) -> bool:
+    """True if *path* has a NIfTI extension (.nii or .nii.gz)."""
+    return path.lower().endswith(NIFTI_EXTENSIONS)
+
+
+def _nifti_entry(file_path: str) -> Optional[dict]:
+    """Build a series dict for one NIfTI file, or None if it is not a 3-D volume."""
+    file_path = os.path.abspath(file_path)
+    reader = sitk.ImageFileReader()
+    reader.SetFileName(file_path)
+    try:
+        reader.ReadImageInformation()
+    except RuntimeError as e:
+        log.warning("Skipping unreadable NIfTI %s: %s", file_path, e)
+        return None
+
+    size = reader.GetSize()
+    if len(size) < 3:
+        log.warning("Skipping %s: %d-D image, need a 3-D volume", file_path, len(size))
+        return None
+
+    return dict(
+        series_uid=NIFTI_UID_PREFIX + file_path,
+        series_dir=os.path.dirname(file_path),
+        description=os.path.basename(file_path),
+        num_slices=int(size[2]),
+        modality="NIfTI",
+        patient_name="Unknown",
+    )
+
 
 # ---------------------------------------------------------------------------
 # Series listing
 # ---------------------------------------------------------------------------
 
 def list_series(folder: str) -> list[dict]:
-    """Scan *folder* for DICOM series and return a list of metadata dicts.
+    """Scan *folder* for DICOM series and NIfTI files and return metadata dicts.
+
+    *folder* may also be a single .nii / .nii.gz file, which yields one entry.
 
     Each dict contains:
-      series_uid        : str  — DICOM SeriesInstanceUID
-      description       : str  — SeriesDescription (or fallback label)
+      series_uid        : str  — DICOM SeriesInstanceUID, or "nifti:<abs path>"
+      description       : str  — SeriesDescription (or file name for NIfTI)
       num_slices        : int
-      modality          : str  — CT / MR / etc.
+      modality          : str  — CT / MR / etc. ("NIfTI" for NIfTI files)
       patient_name      : str
     """
+    if os.path.isfile(folder) and is_nifti_path(folder):
+        entry = _nifti_entry(folder)
+        return [entry] if entry else []
+
     if not os.path.isdir(folder):
         raise FileNotFoundError(f"Folder not found: {folder}")
 
@@ -42,6 +84,14 @@ def list_series(folder: str) -> list[dict]:
     dirs_to_scan = set()
     for root, dirs, files in os.walk(folder):
         dirs_to_scan.add(root)
+
+    nifti_entries = []
+    for root, dirs, files in os.walk(folder):
+        for f in sorted(files):
+            if is_nifti_path(f):
+                entry = _nifti_entry(os.path.join(root, f))
+                if entry:
+                    nifti_entries.append(entry)
 
     # Map uid → (folder_path, file_names) — deduplicate by UID
     uid_map: dict = {}
@@ -52,8 +102,9 @@ def list_series(folder: str) -> list[dict]:
                 if files_in_dir:
                     uid_map[uid] = (d, files_in_dir)
 
-    if not uid_map:
-        log.warning("No DICOM series found in %s (searched %d dirs)", folder, len(dirs_to_scan))
+    if not uid_map and not nifti_entries:
+        log.warning("No DICOM series or NIfTI files found in %s (searched %d dirs)",
+                    folder, len(dirs_to_scan))
         return []
 
     results = []
@@ -90,6 +141,8 @@ def list_series(folder: str) -> list[dict]:
         log.debug("Found series: %s — %s (%d slices)", uid[-8:], description, len(file_names))
 
     # Sort by number of slices descending (largest series first — most likely the vessel)
+    # NIfTI after DICOM so the stable sort keeps DICOM as the default on ties
+    results.extend(nifti_entries)
     results.sort(key=lambda s: s["num_slices"], reverse=True)
     return results
 
@@ -101,8 +154,16 @@ def list_series(folder: str) -> list[dict]:
 def load_series(folder: str, series_uid: str) -> sitk.Image:
     """Load a DICOM series identified by *series_uid* from *folder*.
 
+    NIfTI volumes (series_uid from list_series starting with "nifti:", or
+    *folder* itself being a .nii / .nii.gz file) are delegated to load_nifti.
+
     Returns a 3-D SimpleITK image with correct spacing, origin, and direction.
     """
+    if series_uid and series_uid.startswith(NIFTI_UID_PREFIX):
+        return load_nifti(series_uid[len(NIFTI_UID_PREFIX):])
+    if os.path.isfile(folder) and is_nifti_path(folder):
+        return load_nifti(folder)
+
     file_names = sitk.ImageSeriesReader.GetGDCMSeriesFileNames(folder, series_uid)
     
     # If not found directly in folder, we might need to look in subdirectories
@@ -125,6 +186,48 @@ def load_series(folder: str, series_uid: str) -> sitk.Image:
     reader.MetaDataDictionaryArrayUpdateOn()
     reader.LoadPrivateTagsOn()
     image = reader.Execute()
+
+    log.info(
+        "Loaded: size=%s  spacing=%.2f×%.2f×%.2f mm",
+        image.GetSize(),
+        *image.GetSpacing(),
+    )
+    return image
+
+
+def load_nifti(file_path: str) -> sitk.Image:
+    """Load a 3-D NIfTI volume (.nii / .nii.gz).
+
+    SimpleITK maps the NIfTI sform/qform to the same LPS physical space it
+    uses for DICOM, and applies scl_slope/scl_inter, so a CT NIfTI comes out
+    in HU just like the DICOM path. A 4-D file keeps only its first volume.
+    """
+    if not os.path.isfile(file_path):
+        raise FileNotFoundError(f"NIfTI file not found: {file_path}")
+
+    log.info("Loading NIfTI %s...", os.path.basename(file_path))
+    image = sitk.ReadImage(file_path)
+
+    if image.GetDimension() == 4:
+        log.warning("%s is 4-D (%d volumes) — using the first volume only",
+                    os.path.basename(file_path), image.GetSize()[3])
+        size = list(image.GetSize())
+        size[3] = 0
+        image = sitk.Extract(image, size, [0, 0, 0, 0])
+    elif image.GetDimension() != 3:
+        raise ValueError(f"{file_path} is {image.GetDimension()}-D; need a 3-D volume.")
+
+    # NIfTI often stores axes flipped/permuted relative to DICOM (e.g. RAS),
+    # but sitk_to_vtk drops the direction matrix, so the mesh would come out
+    # mirrored relative to world mm. Reorienting to LPS is a lossless axis
+    # flip/permute that gives the identity direction a standard axial DICOM has.
+    image = sitk.DICOMOrient(image, "LPS")
+    if not np.allclose(image.GetDirection(), np.eye(3).ravel(), atol=1e-4):
+        log.warning(
+            "%s is oblique (direction %s); meshes will not align with world mm.",
+            os.path.basename(file_path),
+            np.round(image.GetDirection(), 3).tolist(),
+        )
 
     log.info(
         "Loaded: size=%s  spacing=%.2f×%.2f×%.2f mm",
